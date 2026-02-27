@@ -1,0 +1,16 @@
+[settings]
+packages_dir = "packages"
+
+[[package]]
+name          = "editable-web"
+repo          = "ux-mark/editable-web"
+branch        = "main"
+start_command = "bash -c 'lsof -ti:5173 | xargs kill -9 2>/dev/null; npm run dev'"
+url           = "http://localhost:5173"
+
+[[package]]
+name          = "jobs"
+repo          = "ux-mark/jobs"
+branch        = "main"
+start_command = "bash -c 'lsof -ti:5001 | xargs kill -9 2>/dev/null; python3 server.py'"
+url           = "http://localhost:5001"

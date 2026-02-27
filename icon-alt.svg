@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <clipPath id="mask">
+      <rect width="1024" height="1024" rx="228" ry="228"/>
+    </clipPath>
+
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1C1C1E"/>
+      <stop offset="100%" stop-color="#111113"/>
+    </linearGradient>
+
+    <!-- Green glow -->
+    <radialGradient id="gG" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#4CAF50" stop-opacity="0.55"/>
+      <stop offset="55%" stop-color="#4CAF50" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#4CAF50" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="hiTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="6%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="shBot" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="90%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.25"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#mask)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+
+    <!-- Subtle grid -->
+    <g opacity="0.025" stroke="#FFF" stroke-width="0.5" fill="none">
+      <line x1="204" y1="0" x2="204" y2="1024"/>
+      <line x1="408" y1="0" x2="408" y2="1024"/>
+      <line x1="616" y1="0" x2="616" y2="1024"/>
+      <line x1="820" y1="0" x2="820" y2="1024"/>
+      <line x1="0" y1="204" x2="1024" y2="204"/>
+      <line x1="0" y1="408" x2="1024" y2="408"/>
+      <line x1="0" y1="616" x2="1024" y2="616"/>
+      <line x1="0" y1="820" x2="1024" y2="820"/>
+    </g>
+
+    <!-- ========================================== -->
+    <!--  ALT CONCEPT: "All systems green"          -->
+    <!--                                            -->
+    <!--  Three green dots in a triangular cluster  -->
+    <!--  — like services in a healthy system.      -->
+    <!--  One large hero dot, two satellites.        -->
+    <!--  Everything is running. Calm confidence.   -->
+    <!-- ========================================== -->
+
+    <!-- Connection lines between dots (mesh/constellation) -->
+    <line x1="440" y1="596" x2="512" y2="380" stroke="#4CAF50" stroke-opacity="0.12" stroke-width="2.5"/>
+    <line x1="584" y1="596" x2="512" y2="380" stroke="#4CAF50" stroke-opacity="0.12" stroke-width="2.5"/>
+    <line x1="440" y1="596" x2="584" y2="596" stroke="#4CAF50" stroke-opacity="0.08" stroke-width="2"/>
+
+    <!-- Hero dot — center-top, the primary service -->
+    <circle cx="512" cy="380" r="170" fill="url(#gG)"/>
+    <circle cx="512" cy="380" r="76" fill="#2E7D32"/>
+    <circle cx="512" cy="380" r="66" fill="#43A047"/>
+    <circle cx="512" cy="380" r="52" fill="#4CAF50"/>
+    <ellipse cx="502" cy="366" rx="23" ry="18" fill="#A5D6A7" opacity="0.35"/>
+
+    <!-- Satellite dot — bottom-left -->
+    <circle cx="370" cy="636" r="110" fill="url(#gG)"/>
+    <circle cx="370" cy="636" r="52" fill="#2E7D32"/>
+    <circle cx="370" cy="636" r="44" fill="#43A047"/>
+    <circle cx="370" cy="636" r="34" fill="#4CAF50"/>
+    <ellipse cx="362" cy="626" rx="15" ry="11" fill="#A5D6A7" opacity="0.3"/>
+
+    <!-- Satellite dot — bottom-right -->
+    <circle cx="654" cy="636" r="110" fill="url(#gG)"/>
+    <circle cx="654" cy="636" r="52" fill="#2E7D32"/>
+    <circle cx="654" cy="636" r="44" fill="#43A047"/>
+    <circle cx="654" cy="636" r="34" fill="#4CAF50"/>
+    <ellipse cx="646" cy="626" rx="15" ry="11" fill="#A5D6A7" opacity="0.3"/>
+
+    <!-- Depth & finish -->
+    <rect width="1024" height="1024" fill="url(#hiTop)"/>
+    <rect width="1024" height="1024" fill="url(#shBot)"/>
+  </g>
+</svg>

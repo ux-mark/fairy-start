@@ -1,0 +1,22 @@
+# Runtime / cloned repos
+packages/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+
+# macOS app bundle (build artifact)
+Autostart.app/
+
+# Claude Code metadata
+.claude/
+
+# Planning docs
+PLAN-autostart-app.md
