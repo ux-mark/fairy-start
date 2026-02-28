@@ -2,7 +2,7 @@
 
 **Start and monitor your local dev services from a single window on your Mac.**
 
-![Fairy Start](screenshot.png)
+<img src="screenshot.png" width="324" alt="Fairy Start" />
 
 ---
 
