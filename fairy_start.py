@@ -2533,8 +2533,7 @@ def main() -> None:
     _macos_set_app_name()   # must run before tk.Tk()
     config_path = pathlib.Path(__file__).parent / "config.toml"
     if not config_path.exists():
-        print(f"Error: config file not found: {config_path}", file=sys.stderr)
-        sys.exit(1)
+        config_path.write_text('[settings]\npackages_dir = "packages"\n')
 
     try:
         config = Config.load(config_path)
