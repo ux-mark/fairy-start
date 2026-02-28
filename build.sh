@@ -5,27 +5,49 @@ REPO_ROOT="$( cd "$(dirname "$0")" && pwd )"
 APP_NAME="Fairy Start"
 APP_BUNDLE="$REPO_ROOT/$APP_NAME.app"
 
-# ── Detect Python ────────────────────────────────────────────────────────────
+# ── Prerequisites ────────────────────────────────────────────────────────────
+echo "Checking prerequisites..."
+
+# Step 1: Homebrew
+if ! command -v brew &>/dev/null; then
+    echo "  Homebrew not found — it's required to install Python and gh CLI."
+    read -r -p "  Install Homebrew now? [y/N] " answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        echo "  Install it manually from: https://brew.sh"
+        exit 1
+    fi
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Add Homebrew to PATH for the rest of this script (Apple Silicon path)
+    export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+fi
+
+# Step 2: Python with working tkinter
 PYTHON=""
 for candidate in \
     /opt/homebrew/bin/python3.14 \
     /opt/homebrew/bin/python3.13 \
     /opt/homebrew/bin/python3.12 \
-    /opt/homebrew/bin/python3.11 \
-    "$(command -v python3 2>/dev/null || true)"
+    /opt/homebrew/bin/python3.11
 do
-    if [[ -x "$candidate" ]]; then
+    if [[ -x "$candidate" ]] && "$candidate" -c "import tkinter" 2>/dev/null; then
         PYTHON="$candidate"
         break
     fi
 done
 
 if [[ -z "$PYTHON" ]]; then
-    echo "Error: Python 3 not found. Install with: brew install python-tk@3.14" >&2
-    exit 1
+    echo "  python-tk not found — installing..."
+    brew install python-tk@3.14
+    PYTHON=/opt/homebrew/bin/python3.14
 fi
+echo "  ✓ Python + tkinter: $PYTHON"
 
-echo "Using Python: $PYTHON"
+# Step 3: gh CLI
+if ! command -v gh &>/dev/null; then
+    echo "  gh CLI not found — installing..."
+    brew install gh
+fi
+echo "  ✓ gh CLI"
 
 # ── Convert iconset → icns ───────────────────────────────────────────────────
 ICONSET="$REPO_ROOT/AppIcon.iconset"
