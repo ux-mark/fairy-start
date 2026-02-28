@@ -1,10 +1,8 @@
 # Fairy Start
 
+<img src="screenshot.png" width="324" align="right" alt="Fairy Start" />
+
 **Start and monitor your local dev services from a single window on your Mac.**
-
-<img src="screenshot.png" width="324" alt="Fairy Start" />
-
----
 
 ## Install
 
@@ -17,6 +15,8 @@ bash build.sh
 The build script installs everything it needs (Python, gh CLI) automatically. When it's done, drag **Fairy Start.app** into your Applications folder — or double-click it straight from the repo folder.
 
 > The app is tied to wherever you cloned the repo. If you move the folder, re-run `bash build.sh` to update it.
+
+<br clear="right" />
 
 ---
 
