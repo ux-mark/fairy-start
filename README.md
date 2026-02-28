@@ -50,6 +50,22 @@ Edit `config.toml` to point at your own repos, then restart the app.
 
 ---
 
+## Installation (macOS .app)
+
+Run the build script to generate a `Fairy Start.app` bundle for your machine:
+
+```bash
+git clone https://github.com/ux-mark/fairy-start.git
+cd fairy-start
+bash build.sh
+```
+
+Then drag **Fairy Start.app** into your `/Applications` folder (or keep it in the repo folder and double-click it from there).
+
+> **Note:** The app launcher points to wherever you cloned the repo. If you move the repo, re-run `bash build.sh` to update it.
+
+---
+
 ## Configuration
 
 Services are defined in `config.toml` at the project root:

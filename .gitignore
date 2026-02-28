@@ -12,8 +12,9 @@ __pycache__/
 .DS_Store?
 ._*
 
-# macOS app bundle (build artifact)
+# macOS app bundle and build artifacts
 Fairy Start.app/
+AppIcon.icns
 
 # Claude Code metadata
 .claude/
