@@ -1,3 +1,6 @@
+# Personal config (like .env — copy config.example.toml to get started)
+config.toml
+
 # Runtime / cloned repos
 packages/
 

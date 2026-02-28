@@ -1,0 +1,11 @@
+[settings]
+packages_dir = "packages"
+
+[[package]]
+name          = "my-app"
+repo          = "your-username/your-repo"
+branch        = "main"
+start_command = "npm run dev"
+url           = "http://localhost:3000"
+
+# Add more [[package]] blocks for each service you want to manage
