@@ -864,9 +864,19 @@ def ensure_repo(pkg: PackageConfig, packages_dir: pathlib.Path) -> pathlib.Path:
 # Uses git plumbing so the working branch is never touched.
 # ---------------------------------------------------------------------------
 
-def _fairy_backup_pkg(pkg_dir: pathlib.Path) -> None:
+def _fairy_backup_pkg(pkg_dir: pathlib.Path, push: bool = False) -> None:
     """Commit any working-tree changes to the fairy-backup branch without
-    switching branches or stashing.  Best-effort: exceptions are swallowed."""
+    switching branches or stashing, then optionally push to origin.
+    All errors are logged to fairy-backup.log; nothing is ever raised."""
+    log_path = pkg_dir / "fairy-backup.log"
+
+    def _log(msg: str) -> None:
+        try:
+            with log_path.open("a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+        except OSError:
+            pass
+
     try:
         # Only proceed if there are changes
         status = subprocess.run(
@@ -911,19 +921,30 @@ def _fairy_backup_pkg(pkg_dir: pathlib.Path) -> None:
         )
         commit_sha = commit_r.stdout.decode().strip()
 
-        # Point fairy-backup branch at the new commit
+        # Point fairy-backup branch at the new commit (creates it if absent)
         subprocess.run(
             ["git", "update-ref", "refs/heads/fairy-backup", commit_sha],
             cwd=str(pkg_dir), capture_output=True, timeout=5, check=True,
         )
 
-        # Reset the index back to HEAD so working branch stays clean
+        # Reset the index back to HEAD so the working branch stays clean
         subprocess.run(
             ["git", "reset", "HEAD"],
             cwd=str(pkg_dir), capture_output=True, timeout=10,
         )
-    except Exception:
-        pass  # backup is best-effort; never surface errors to the user
+
+        # Push to origin — git creates the remote branch automatically if absent
+        if push:
+            push_r = subprocess.run(
+                ["git", "push", "origin", "fairy-backup"],
+                cwd=str(pkg_dir), capture_output=True, timeout=30,
+            )
+            if push_r.returncode != 0:
+                err = push_r.stderr.decode(errors="replace").strip()
+                _log(f"push failed: {err}")
+
+    except Exception as exc:
+        _log(f"backup error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -2351,7 +2372,8 @@ class AutostartApp:
             for pkg in list(self._config.packages):
                 pkg_dir = self._packages_dir / pkg.name
                 if pkg_dir.exists():
-                    _fairy_backup_pkg(pkg_dir)
+                    push = "ux-mark/" in pkg.repo
+                    _fairy_backup_pkg(pkg_dir, push=push)
 
     # ---- Window close -----------------------------------------------
 
