@@ -5,12 +5,26 @@ packages_dir = "packages"
 name          = "editable-web"
 repo          = "ux-mark/editable-web"
 branch        = "main"
-start_command = "bash -c 'lsof -ti:5173 | xargs kill -9 2>/dev/null; npm run dev'"
-url           = "http://localhost:5173"
+start_command = "bash -c 'lsof -ti:5050 | xargs kill -9 2>/dev/null; npm run dev'"
+url           = "http://localhost:5050"
 
 [[package]]
 name          = "jobs"
 repo          = "ux-mark/jobs"
 branch        = "main"
-start_command = "bash -c 'lsof -ti:5001 | xargs kill -9 2>/dev/null; python3 server.py'"
+start_command = "bash -c 'lsof -ti:5001 | xargs kill -9 2>/dev/null; bash start.sh'"
 url           = "http://localhost:5001"
+
+[[package]]
+name          = "professional-website-MW"
+repo          = "ux-mark/professional-website-MW"
+branch        = "main"
+start_command = "npm run dev"
+url           = "http://localhost:5173"
+
+[[package]]
+name          = "xmas-ordering"
+repo          = "ux-mark/xmas-ordering"
+branch        = "main"
+start_command = "bash init.sh"
+url           = "http://localhost:5173"
