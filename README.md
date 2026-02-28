@@ -34,6 +34,8 @@ Fairy Start clones the repo on first run and pulls the latest on every subsequen
 
 Click **Start** on any service to launch it. When it's up, an **Open →** link appears to open it in your browser. **Start All** starts everything at once.
 
+Fairy Start silently checks for updates in the background. If a newer version is available, a green banner appears — click **Update Now** to pull the latest and restart.
+
 ---
 
 <details>
@@ -51,6 +53,7 @@ repo          = "user/repo"                  # GitHub shorthand or full https://
 branch        = "main"
 start_command = "npm install && npm start"
 url           = "http://localhost:3000"      # optional — enables health checks + Open button
+fairy_backup  = false                        # optional — disable auto-backup for this repo (default: true)
 
 [[package]]
 name          = "another-service"
