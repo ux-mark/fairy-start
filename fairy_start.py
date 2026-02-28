@@ -67,6 +67,98 @@ def _macos_set_app_name() -> None:
         pass
 
 
+def _macos_configure_titlebar(root: "tk.Tk") -> None:
+    """Make the titlebar transparent with visible traffic-light buttons.
+
+    Sets NSWindow properties so the titlebar chrome blends into the app
+    background while keeping close/minimize/maximize controls visible.
+    Uses the same ctypes/ObjC runtime pattern as _macos_set_app_name().
+    """
+    import sys
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        objc = ctypes.cdll.LoadLibrary("libobjc.dylib")
+        objc.objc_getClass.restype    = ctypes.c_void_p
+        objc.objc_getClass.argtypes   = [ctypes.c_char_p]
+        objc.sel_registerName.restype  = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def _msg(restype, obj, sel_bytes, *args):
+            fn = objc.objc_msgSend
+            fn.restype  = restype
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [type(a) for a in args]
+            return fn(obj, objc.sel_registerName(sel_bytes), *args)
+
+        # --- get the NSWindow for the Tk root ---
+        # Tk's winfo_id() is NOT a valid NSView on modern macOS Tk, so we
+        # go through NSApplication → windows array and match by title.
+        root.update()  # force full event processing so NSWindow exists
+
+        NSApp = objc.objc_getClass(b"NSApplication")
+        app   = _msg(ctypes.c_void_p, NSApp, b"sharedApplication")
+        wins  = _msg(ctypes.c_void_p, app,   b"windows")
+        count = _msg(ctypes.c_uint64, wins,  b"count")
+        if count == 0:
+            return
+
+        # Find the window whose title matches our Tk root title.
+        win = None
+        title = root.title()
+        for i in range(count):
+            w = _msg(ctypes.c_void_p, wins, b"objectAtIndex:",
+                     ctypes.c_uint64(i))
+            if not w:
+                continue
+            ns_title = _msg(ctypes.c_void_p, w, b"title")
+            if not ns_title:
+                continue
+            utf8 = _msg(ctypes.c_char_p, ns_title, b"UTF8String")
+            if utf8 and utf8.decode("utf-8", errors="replace") == title:
+                win = w
+                break
+
+        if not win:
+            # Fallback: just use the first window.
+            win = _msg(ctypes.c_void_p, wins, b"objectAtIndex:",
+                       ctypes.c_uint64(0))
+        if not win:
+            return
+
+        # titlebarAppearsTransparent = YES
+        _msg(None, win, b"setTitlebarAppearsTransparent:", ctypes.c_bool(True))
+
+        # titleVisibility = NSWindowTitleHidden (1)
+        _msg(None, win, b"setTitleVisibility:", ctypes.c_int64(1))
+
+        # styleMask |= NSWindowStyleMaskFullSizeContentView (1 << 15)
+        current_mask = _msg(ctypes.c_uint64, win, b"styleMask")
+        new_mask = current_mask | (1 << 15)
+        _msg(None, win, b"setStyleMask:", ctypes.c_uint64(new_mask))
+
+        # backgroundColor — parse WINDOW_BG (#1E1E24) into NSColor
+        bg = WINDOW_BG.lstrip("#")
+        r = int(bg[0:2], 16) / 255.0
+        g = int(bg[2:4], 16) / 255.0
+        b_val = int(bg[4:6], 16) / 255.0
+        NSColor = objc.objc_getClass(b"NSColor")
+        color = _msg(
+            ctypes.c_void_p, NSColor,
+            b"colorWithRed:green:blue:alpha:",
+            ctypes.c_double(r), ctypes.c_double(g),
+            ctypes.c_double(b_val), ctypes.c_double(1.0),
+        )
+        _msg(None, win, b"setBackgroundColor:", ctypes.c_void_p(color))
+
+        # movableByWindowBackground = YES
+        _msg(None, win, b"setMovableByWindowBackground:", ctypes.c_bool(True))
+
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
@@ -110,6 +202,10 @@ DISABLED_TEXT = "#6B6B76"
 GREEN      = "#4ADE80"
 GREEN_GLOW = "#1A5C32"
 AMBER      = "#FBBF24"
+
+# Standard macOS titlebar height (28pt) — used as a spacer so content
+# doesn't overlap the traffic-light buttons.
+_TITLEBAR_HEIGHT = 28
 
 # Indent for row-2 to align content under the service name (dot canvas + gap)
 DOT_CANVAS_INDENT = 34
@@ -1632,9 +1728,18 @@ class FairyStartApp:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._root = root
 
+        # Transparent titlebar — the function calls root.update() internally
+        # to ensure the NSWindow exists before configuring it.
+        _macos_configure_titlebar(root)
+
         self._font_name = self._resolve_font()
         self._mono_font = self._resolve_mono_font()
         fn = self._font_name
+
+        # ── Titlebar spacer (keeps content below traffic-light buttons) ─
+        spacer = tk.Frame(root, bg=HEADER_BG, height=_TITLEBAR_HEIGHT)
+        spacer.pack(fill=tk.X)
+        spacer.pack_propagate(False)
 
         # ── Header bar ─────────────────────────────────────────────────
         header = tk.Frame(root, bg=HEADER_BG, height=52)
