@@ -13,10 +13,10 @@ __pycache__/
 ._*
 
 # macOS app bundle (build artifact)
-Autostart.app/
+Fairy Start.app/
 
 # Claude Code metadata
 .claude/
 
 # Planning docs
-PLAN-autostart-app.md
+PLAN-fairy-start-app.md

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Autostart — lightweight macOS service manager with per-service controls."""
+"""Fairy Start — lightweight macOS service manager with per-service controls."""
 
 from __future__ import annotations
 
@@ -459,7 +459,7 @@ class DotAnimator:
 # Exceptions
 # ---------------------------------------------------------------------------
 
-class AutostartError(Exception):
+class FairyStartError(Exception):
     pass
 
 
@@ -534,22 +534,22 @@ def gh_api(endpoint: str, timeout: int = 15) -> dict:
             timeout=timeout,
         )
     except FileNotFoundError:
-        raise AutostartError("gh CLI not found — install from https://cli.github.com")
+        raise FairyStartError("gh CLI not found — install from https://cli.github.com")
     except subprocess.TimeoutExpired:
-        raise AutostartError(f"gh api timed out for: {endpoint}")
+        raise FairyStartError(f"gh api timed out for: {endpoint}")
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="replace").strip()
-        raise AutostartError(f"gh api failed: {stderr}")
+        raise FairyStartError(f"gh api failed: {stderr}")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise AutostartError(f"gh api returned invalid JSON: {exc}")
+        raise FairyStartError(f"gh api returned invalid JSON: {exc}")
 
 
 def gh_file_content(owner: str, repo: str, path: str) -> Optional[str]:
     try:
         data = gh_api(f"repos/{owner}/{repo}/contents/{path}")
-    except AutostartError as exc:
+    except FairyStartError as exc:
         msg = str(exc)
         if "404" in msg or "Not Found" in msg:
             return None
@@ -818,12 +818,12 @@ def _run_git(
             timeout=timeout,
         )
     except FileNotFoundError:
-        raise AutostartError("git not found — install Xcode Command Line Tools")
+        raise FairyStartError("git not found — install Xcode Command Line Tools")
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace").strip()
-        raise AutostartError(f"git failed: {stderr}")
+        raise FairyStartError(f"git failed: {stderr}")
     except subprocess.TimeoutExpired:
-        raise AutostartError("git timed out")
+        raise FairyStartError("git timed out")
 
 
 def _maybe_npm_install(pkg_dir: pathlib.Path) -> None:
@@ -838,12 +838,12 @@ def _maybe_npm_install(pkg_dir: pathlib.Path) -> None:
             timeout=120,
         )
     except FileNotFoundError:
-        raise AutostartError("npm not found — install Node.js from https://nodejs.org")
+        raise FairyStartError("npm not found — install Node.js from https://nodejs.org")
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace").strip()
-        raise AutostartError(f"npm install failed: {stderr}")
+        raise FairyStartError(f"npm install failed: {stderr}")
     except subprocess.TimeoutExpired:
-        raise AutostartError("npm install timed out")
+        raise FairyStartError("npm install timed out")
 
 
 def ensure_repo(pkg: PackageConfig, packages_dir: pathlib.Path) -> pathlib.Path:
@@ -959,7 +959,7 @@ class ProcessManager:
 
     def start_one(self, pkg: PackageConfig) -> None:
         pkg_dir = self._packages_dir / pkg.name
-        log_path = pkg_dir / "autostart.log"
+        log_path = pkg_dir / "fairy-start.log"
         log_fh = log_path.open("a")
         self._log_fhs[pkg.name] = log_fh
         proc = subprocess.Popen(
@@ -1034,16 +1034,16 @@ def _pkg_worker(
         _deadline = time.monotonic() + 1.5
         while time.monotonic() < _deadline:
             if pm.poll_one(pkg.name) is not None:
-                log_path = pkg_dir / "autostart.log"
+                log_path = pkg_dir / "fairy-start.log"
                 try:
                     log_text = log_path.read_text(errors="replace")
                 except OSError:
                     log_text = ""
                 msg = _make_advisory(log_text) or "Service stopped immediately after starting."
-                raise AutostartError(msg)
+                raise FairyStartError(msg)
             time.sleep(0.1)
         ui_queue.put(("pkg_state", pkg.name, PkgState.RUNNING, ""))
-    except AutostartError as exc:
+    except FairyStartError as exc:
         ui_queue.put(("pkg_state", pkg.name, PkgState.ERROR, str(exc)))
     except Exception as exc:
         ui_queue.put(("pkg_state", pkg.name, PkgState.ERROR, f"Unexpected error: {exc}"))
@@ -1315,7 +1315,7 @@ class AddServiceDialog:
             try:
                 result = detect_service(owner, repo)
                 self._queue.put(("ok", result))
-            except AutostartError as exc:
+            except FairyStartError as exc:
                 self._queue.put(("error", str(exc)))
             except Exception as exc:
                 self._queue.put(("error", f"Unexpected error: {exc}"))
@@ -1492,7 +1492,7 @@ class EditServiceDialog:
 # Application
 # ---------------------------------------------------------------------------
 
-class AutostartApp:
+class FairyStartApp:
     _POLL_MS              = 100
     _HEALTH_INTERVAL      = 5.0
     _MONITOR_POLL         = 2.0
@@ -1534,32 +1534,11 @@ class AutostartApp:
 
     def _build_ui(self) -> None:
         root = tk.Tk()
-        root.title("Autostart")
+        root.title("Fairy Start")
         root.resizable(False, True)
         root.configure(bg=WINDOW_BG)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._root = root
-
-        # App icon — titlebar
-        try:
-            _icon_path = pathlib.Path(__file__).parent / "AppIcon.iconset" / "icon_32x32@2x.png"
-            if _icon_path.exists():
-                self._app_icon = tk.PhotoImage(file=str(_icon_path))
-                root.iconphoto(True, self._app_icon)
-        except Exception:
-            pass
-
-        # App icon — macOS Dock (no forced size — let macOS scale correctly)
-        try:
-            from AppKit import NSApplication, NSImage  # type: ignore[import]
-            _icns = (pathlib.Path(__file__).parent
-                     / "Autostart.app" / "Contents" / "Resources" / "AppIcon.icns")
-            if _icns.exists():
-                _nsimg = NSImage.alloc().initWithContentsOfFile_(str(_icns))
-                if _nsimg:
-                    NSApplication.sharedApplication().setApplicationIconImage_(_nsimg)
-        except Exception:
-            pass
 
         self._font_name = self._resolve_font()
         self._mono_font = self._resolve_mono_font()
@@ -1583,7 +1562,7 @@ class AutostartApp:
             pass
 
         tk.Label(
-            header, text="Autostart",
+            header, text="Fairy Start",
             bg=HEADER_BG, fg=TEXT_PRIMARY,
             font=(fn, 16, "bold"),
         ).pack(side=tk.LEFT, padx=(8, 0))
@@ -2152,7 +2131,7 @@ class AutostartApp:
                             self._set_pkg_state(pkg_name, PkgState.ERROR, log_tail)
 
                 except Exception as exc:
-                    print(f"[Autostart] error handling {msg[0]!r} for {msg[1]!r}: {exc}",
+                    print(f"[Fairy Start] error handling {msg[0]!r} for {msg[1]!r}: {exc}",
                           file=sys.stderr)
 
         except queue.Empty:
@@ -2261,7 +2240,7 @@ class AutostartApp:
     # ---- Log reading ------------------------------------------------
 
     def _read_log_tail(self, pkg_name: str, n: int = 8) -> str:
-        log_path = self._packages_dir / pkg_name / "autostart.log"
+        log_path = self._packages_dir / pkg_name / "fairy-start.log"
         try:
             text = log_path.read_text(errors="replace")
             lines = []
@@ -2320,7 +2299,7 @@ class AutostartApp:
     def _on_remove_service(self, pkg_name: str) -> None:
         pkg_dir = self._packages_dir / pkg_name
         msg = (
-            f"Remove '{pkg_name}' from Autostart?"
+            f"Remove '{pkg_name}' from Fairy Start?"
             + (f"\n\nThis will also delete {pkg_dir}." if pkg_dir.exists() else "")
             + "\n\nThis cannot be undone."
         )
@@ -2406,7 +2385,7 @@ def main() -> None:
         print(f"Error: invalid config.toml — {exc}", file=sys.stderr)
         sys.exit(1)
 
-    app = AutostartApp(config, config_path)
+    app = FairyStartApp(config, config_path)
     app.run()
 
 
