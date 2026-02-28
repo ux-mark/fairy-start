@@ -1,10 +1,10 @@
 # Fairy Start
 
-<img src="screenshot.png" width="324" align="right" alt="Fairy Start" />
-
 **Start and monitor your local dev services from a single window on your Mac.**
 
 ## Install
+
+<img src="screenshot.png" width="324" align="right" alt="Fairy Start" />
 
 ```bash
 git clone https://github.com/ux-mark/fairy-start.git
