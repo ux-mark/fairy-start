@@ -28,6 +28,45 @@ import webbrowser
 from typing import Callable, Optional
 
 
+def _macos_set_app_name() -> None:
+    """Override the macOS menu-bar app name to 'Fairy Start' before NSApplication init.
+
+    Must be called before tk.Tk() — Tk reads CFBundleName from NSBundle.mainBundle()
+    when it creates the application menu.  Uses the ObjC runtime via ctypes;
+    no external packages required.
+    """
+    import sys
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        _lib = ctypes.cdll.LoadLibrary("libobjc.dylib")
+        _lib.objc_getClass.restype    = ctypes.c_void_p
+        _lib.objc_getClass.argtypes   = [ctypes.c_char_p]
+        _lib.sel_registerName.restype  = ctypes.c_void_p
+        _lib.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def _msg(restype, obj, sel_bytes, *args):
+            fn = _lib.objc_msgSend
+            fn.restype  = restype
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [type(a) for a in args]
+            return fn(obj, _lib.sel_registerName(sel_bytes), *args)
+
+        NSBundle = _lib.objc_getClass(b"NSBundle")
+        NSString = _lib.objc_getClass(b"NSString")
+
+        bundle = _msg(ctypes.c_void_p, NSBundle, b"mainBundle")
+        info   = _msg(ctypes.c_void_p, bundle,   b"infoDictionary")
+        key    = _msg(ctypes.c_void_p, NSString,  b"stringWithUTF8String:",
+                      ctypes.c_char_p(b"CFBundleName"))
+        val    = _msg(ctypes.c_void_p, NSString,  b"stringWithUTF8String:",
+                      ctypes.c_char_p(b"Fairy Start"))
+        _msg(None, info, b"setObject:forKey:",
+             ctypes.c_void_p(val), ctypes.c_void_p(key))
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # State machine
 # ---------------------------------------------------------------------------
@@ -539,11 +578,27 @@ def gh_api(endpoint: str, timeout: int = 15) -> dict:
         raise FairyStartError(f"gh api timed out for: {endpoint}")
     if result.returncode != 0:
         stderr = result.stderr.decode(errors="replace").strip()
+        _AUTH_HINTS = ("not logged", "auth token", "Please log in", "authentication required")
+        if any(h.lower() in stderr.lower() for h in _AUTH_HINTS):
+            raise FairyStartError(
+                "GitHub authentication has expired — click 'Connect' in the banner to log in again."
+            )
         raise FairyStartError(f"gh api failed: {stderr}")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise FairyStartError(f"gh api returned invalid JSON: {exc}")
+
+
+def gh_auth_status() -> str:
+    """Return 'authenticated', 'unauthenticated', or 'gh_not_found'. Background thread only."""
+    try:
+        result = subprocess.run(["gh", "auth", "status"], capture_output=True, timeout=10)
+    except FileNotFoundError:
+        return "gh_not_found"
+    except subprocess.TimeoutExpired:
+        return "unauthenticated"
+    return "authenticated" if result.returncode == 0 else "unauthenticated"
 
 
 def gh_file_content(owner: str, repo: str, path: str) -> Optional[str]:
@@ -1497,6 +1552,7 @@ class FairyStartApp:
     _HEALTH_INTERVAL      = 5.0
     _MONITOR_POLL         = 2.0
     _FAIRY_BACKUP_INTERVAL = 300.0
+    _AUTH_RECHECK_MS      = 30_000
 
     def __init__(self, config: Config, config_path: pathlib.Path) -> None:
         self._config = config
@@ -1510,6 +1566,10 @@ class FairyStartApp:
         self._stopping: set[str] = set()
         self._ui_queue: queue.Queue = queue.Queue()
         self._fairy_backup_stop = threading.Event()
+
+        self._auth_banner: Optional[tk.Frame] = None
+        self._auth_banner_visible: bool = False
+        self._auth_check_job: Optional[str] = None
 
         self._build_ui()
         self._start_fairy_backup()
@@ -1610,6 +1670,9 @@ class FairyStartApp:
         # Header bottom border
         tk.Frame(root, bg=CARD_BORDER, height=1).pack(fill=tk.X)
 
+        # ── Auth banner (hidden until needed) ──────────────────────────
+        self._build_auth_banner()
+
         # ── Card list area ─────────────────────────────────────────────
         cards_outer = tk.Frame(root, bg=WINDOW_BG)
         cards_outer.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
@@ -1625,6 +1688,7 @@ class FairyStartApp:
                 self._add_pkg_card(pkg)
 
         root.after(self._POLL_MS, self._poll_queue)
+        root.after(500, self._run_auth_check)   # 500ms lets the window render first
 
     def _show_empty_state(self) -> None:
         frame = tk.Frame(self._cards_outer, bg=WINDOW_BG)
@@ -2338,6 +2402,96 @@ class FairyStartApp:
         self._update_global_btn()
         self._root.geometry("")
 
+    # ---- GitHub auth banner -----------------------------------------
+
+    def _build_auth_banner(self) -> None:
+        fn = self._font_name
+        banner = tk.Frame(self._root, bg="#2A1A00", height=36)
+        banner.pack_propagate(False)
+        # Left amber accent bar
+        tk.Frame(banner, bg=AMBER, width=3).pack(side=tk.LEFT, fill=tk.Y)
+        # Content area
+        content = tk.Frame(banner, bg="#2A1A00")
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        # Warning icon + message
+        tk.Label(
+            content, text="⚠",
+            bg="#2A1A00", fg=AMBER,
+            font=(fn, 12),
+        ).pack(side=tk.LEFT, pady=8)
+        tk.Label(
+            content,
+            text=" GitHub not connected — some repos may be inaccessible.",
+            bg="#2A1A00", fg=AMBER,
+            font=(fn, 11),
+        ).pack(side=tk.LEFT, pady=8)
+        # Connect button
+        connect_btn = CanvasButton(
+            banner, text="Connect",
+            font=(fn, 11),
+            bg=AMBER, fg="#1E1E24",
+            hover_bg="#F59E0B", hover_fg="#1E1E24",
+            padx=10, pady=3,
+            command=self._on_connect_github,
+            parent_bg="#2A1A00",
+        )
+        connect_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        # Dismiss button
+        dismiss = tk.Label(
+            banner, text="✕",
+            bg="#2A1A00", fg=TEXT_SECONDARY,
+            font=(fn, 12), cursor="pointinghand",
+        )
+        dismiss.pack(side=tk.RIGHT, padx=(0, 4))
+        dismiss.bind("<Button-1>", lambda e: self._dismiss_auth_banner())
+        dismiss.bind("<Enter>", lambda e: dismiss.configure(fg=TEXT_PRIMARY))
+        dismiss.bind("<Leave>", lambda e: dismiss.configure(fg=TEXT_SECONDARY))
+
+        self._auth_banner = banner
+
+    def _show_auth_banner(self) -> None:
+        if self._auth_banner_visible or self._auth_banner is None:
+            return
+        self._auth_banner.pack(fill=tk.X, before=self._cards_outer)
+        self._auth_banner_visible = True
+
+    def _hide_auth_banner(self) -> None:
+        if not self._auth_banner_visible or self._auth_banner is None:
+            return
+        self._auth_banner.pack_forget()
+        self._auth_banner_visible = False
+
+    def _dismiss_auth_banner(self) -> None:
+        self._hide_auth_banner()
+        if self._auth_check_job is not None:
+            self._root.after_cancel(self._auth_check_job)
+            self._auth_check_job = None
+
+    def _on_connect_github(self) -> None:
+        script = ('tell application "Terminal"\n'
+                  '    activate\n'
+                  '    do script "gh auth login --web"\n'
+                  'end tell')
+        subprocess.Popen(["osascript", "-e", script])
+
+    def _run_auth_check(self) -> None:
+        self._auth_check_job = None
+        def _check():
+            status = gh_auth_status()
+            if self._root.winfo_exists():
+                self._root.after(0, lambda: self._apply_auth_status(status))
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _apply_auth_status(self, status: str) -> None:
+        if status == "gh_not_found":
+            return   # gh not installed; different problem
+        if status == "authenticated":
+            self._hide_auth_banner()
+        else:
+            self._show_auth_banner()
+        # Reschedule so banner reappears if token expires mid-session
+        self._auth_check_job = self._root.after(self._AUTH_RECHECK_MS, self._run_auth_check)
+
     # ---- Fairy backup -----------------------------------------------
 
     def _start_fairy_backup(self) -> None:
@@ -2357,6 +2511,8 @@ class FairyStartApp:
     # ---- Window close -----------------------------------------------
 
     def _on_close(self) -> None:
+        if self._auth_check_job is not None:
+            self._root.after_cancel(self._auth_check_job)
         self._fairy_backup_stop.set()
         for ev in self._pkg_stop_events.values():
             ev.set()
@@ -2374,6 +2530,7 @@ class FairyStartApp:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    _macos_set_app_name()   # must run before tk.Tk()
     config_path = pathlib.Path(__file__).parent / "config.toml"
     if not config_path.exists():
         print(f"Error: config file not found: {config_path}", file=sys.stderr)
