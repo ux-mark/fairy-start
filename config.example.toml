@@ -7,5 +7,6 @@ repo          = "your-username/your-repo"
 branch        = "main"
 start_command = "npm run dev"
 url           = "http://localhost:3000"
+# fairy_backup = false   # set to false to disable auto-backup for this repo
 
 # Add more [[package]] blocks for each service you want to manage

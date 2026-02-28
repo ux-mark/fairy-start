@@ -513,6 +513,7 @@ class PackageConfig:
     branch: str
     start_command: str
     url: Optional[str] = None
+    fairy_backup: bool = True
 
     @property
     def github_url(self) -> str:
@@ -540,6 +541,7 @@ class Config:
                 branch=entry.get("branch", "main"),
                 start_command=entry.get("start_command", ""),
                 url=entry.get("url"),
+                fairy_backup=entry.get("fairy_backup", True),
             ))
         return cls(packages_dir=packages_dir, packages=pkgs)
 
@@ -852,6 +854,8 @@ def rewrite_config(
         ]
         if pkg.url:
             lines.append(f'url           = "{_toml_str(pkg.url)}"')
+        if not pkg.fairy_backup:
+            lines.append(f'fairy_backup  = false')
     config_path.write_text("\n".join(lines) + "\n")
 
 
@@ -1433,7 +1437,7 @@ class EditServiceDialog:
         self,
         parent: tk.Tk,
         pkg: PackageConfig,
-        on_confirm: Callable[[str, str, Optional[str]], None],
+        on_confirm: Callable[[str, str, Optional[str], bool], None],
         font_name: str,
     ) -> None:
         self._pkg = pkg
@@ -1495,10 +1499,30 @@ class EditServiceDialog:
         branch_var = tk.StringVar(value=pkg.branch)
         cmd_var    = tk.StringVar(value=pkg.start_command)
         url_var    = tk.StringVar(value=pkg.url or "")
+        fairy_backup_var = tk.BooleanVar(value=pkg.fairy_backup)
 
         _field("Branch", branch_var)
         _field("Start command", cmd_var, highlight_empty=True)
         _field("URL", url_var)
+
+        # Auto-backup checkbox row
+        cb_row = tk.Frame(frame, bg=CARD_BG)
+        cb_row.pack(fill=tk.X, pady=3)
+        tk.Label(cb_row, text="Auto-backup", bg=CARD_BG, fg=TEXT_SECONDARY,
+                 font=(fn, 10), width=14, anchor="e").pack(side=tk.LEFT)
+        cb_inner = tk.Frame(cb_row, bg=CARD_BG)
+        cb_inner.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Checkbutton(
+            cb_inner, variable=fairy_backup_var,
+            bg=CARD_BG, fg=TEXT_SECONDARY,
+            activebackground=CARD_BG, activeforeground=TEXT_PRIMARY,
+            selectcolor=CARD_BG,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            cb_inner,
+            text="Commit working-tree changes to fairy-backup branch every 5 min",
+            bg=CARD_BG, fg=TEXT_TERTIARY, font=(fn, 9),
+        ).pack(side=tk.LEFT, padx=(2, 0))
 
         tk.Label(
             self._top, text="Changes take effect on the next start.",
@@ -1520,7 +1544,7 @@ class EditServiceDialog:
 
         save_btn = CanvasButton(
             btn_row, text="Save Changes", font=(fn, 12, "bold"),
-            command=lambda: self._save(branch_var, cmd_var, url_var),
+            command=lambda: self._save(branch_var, cmd_var, url_var, fairy_backup_var),
             bg=BLUE, fg="#FFFFFF",
             hover_bg=BLUE_HOVER, hover_fg="#FFFFFF",
             padx=16, pady=7, parent_bg=CARD_BG,
@@ -1533,19 +1557,23 @@ class EditServiceDialog:
         cmd_var.trace_add("write", _check)
 
     def _save(self, branch_var: tk.StringVar, cmd_var: tk.StringVar,
-              url_var: tk.StringVar) -> None:
-        branch = branch_var.get().strip() or "main"
-        cmd    = cmd_var.get().strip()
-        url    = url_var.get().strip() or None
+              url_var: tk.StringVar, fairy_backup_var: tk.BooleanVar) -> None:
+        branch       = branch_var.get().strip() or "main"
+        cmd          = cmd_var.get().strip()
+        url          = url_var.get().strip() or None
+        fairy_backup = fairy_backup_var.get()
         if not cmd:
             return
         self._top.destroy()
-        self._on_confirm(branch, cmd, url)
+        self._on_confirm(branch, cmd, url, fairy_backup)
 
 
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
+
+_FAIRY_START_REPO = "ux-mark/fairy-start"
+
 
 class FairyStartApp:
     _POLL_MS              = 100
@@ -1553,6 +1581,7 @@ class FairyStartApp:
     _MONITOR_POLL         = 2.0
     _FAIRY_BACKUP_INTERVAL = 300.0
     _AUTH_RECHECK_MS      = 30_000
+    _UPDATE_CHECK_DELAY_MS = 2_000
 
     def __init__(self, config: Config, config_path: pathlib.Path) -> None:
         self._config = config
@@ -1570,6 +1599,9 @@ class FairyStartApp:
         self._auth_banner: Optional[tk.Frame] = None
         self._auth_banner_visible: bool = False
         self._auth_check_job: Optional[str] = None
+
+        self._update_banner: Optional[tk.Frame] = None
+        self._update_banner_visible: bool = False
 
         self._build_ui()
         self._start_fairy_backup()
@@ -1689,6 +1721,8 @@ class FairyStartApp:
 
         root.after(self._POLL_MS, self._poll_queue)
         root.after(500, self._run_auth_check)   # 500ms lets the window render first
+        self._build_update_banner()
+        self._start_update_check()
 
     def _show_empty_state(self) -> None:
         frame = tk.Frame(self._cards_outer, bg=WINDOW_BG)
@@ -1808,6 +1842,14 @@ class FairyStartApp:
                 font=(fn, 11), anchor="w",
             )
             url_lbl.pack(side=tk.LEFT)
+
+        backup_off_lbl = tk.Label(
+            row2, text="backup off",
+            bg=CARD_BG, fg=TEXT_TERTIARY,
+            font=(fn, 9), anchor="w",
+        )
+        if not pkg.fairy_backup:
+            backup_off_lbl.pack(side=tk.LEFT, padx=(6, 0))
 
         # ── Context menu (right-click power-user shortcut) ────────────
         ctx_menu = tk.Menu(card, tearoff=False,
@@ -1969,11 +2011,12 @@ class FairyStartApp:
         _bind_events(card)
 
         self._pkg_widgets[pkg.name] = {
-            "outer":          outer,
-            "card":           card,
-            "dot_animator":   dot_animator,
-            "action_btn":     action_btn,
-            "url_lbl":        url_lbl,
+            "outer":           outer,
+            "card":            card,
+            "dot_animator":    dot_animator,
+            "action_btn":      action_btn,
+            "url_lbl":         url_lbl,
+            "backup_off_lbl":  backup_off_lbl,
             "advisory_outer": advisory_outer,
             "advisory_lbl":   advisory_lbl,
             "advisory_inner": advisory_inner,
@@ -2344,10 +2387,11 @@ class FairyStartApp:
         if pkg is None:
             return
 
-        def _on_confirm(branch: str, start_command: str, url: Optional[str]) -> None:
+        def _on_confirm(branch: str, start_command: str, url: Optional[str], fairy_backup: bool) -> None:
             pkg.branch = branch
             pkg.start_command = start_command
             pkg.url = url
+            pkg.fairy_backup = fairy_backup
             rewrite_config(self._config_path, self._config.packages_dir, self._config.packages)
             # Update url_lbl text if it exists
             w = self._pkg_widgets.get(pkg_name)
@@ -2355,6 +2399,12 @@ class FairyStartApp:
                 _pm = re.search(r':(\d+)', url)
                 new_text = f"localhost:{_pm.group(1)}" if _pm else url
                 w["url_lbl"].configure(text=new_text)
+            # Update backup_off_lbl visibility
+            if w and w.get("backup_off_lbl"):
+                if fairy_backup:
+                    w["backup_off_lbl"].pack_forget()
+                else:
+                    w["backup_off_lbl"].pack(side=tk.LEFT, padx=(6, 0))
 
         EditServiceDialog(self._root, pkg, _on_confirm, self._font_name)
 
@@ -2492,6 +2542,137 @@ class FairyStartApp:
         # Reschedule so banner reappears if token expires mid-session
         self._auth_check_job = self._root.after(self._AUTH_RECHECK_MS, self._run_auth_check)
 
+    # ---- Update banner ----------------------------------------------
+
+    def _build_update_banner(self) -> None:
+        fn = self._font_name
+        banner = tk.Frame(self._root, bg="#0D2017", height=36)
+        banner.pack_propagate(False)
+        # Left green accent bar
+        tk.Frame(banner, bg=GREEN, width=3).pack(side=tk.LEFT, fill=tk.Y)
+        # Content area
+        content = tk.Frame(banner, bg="#0D2017")
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        # Icon + message
+        tk.Label(
+            content, text="↑",
+            bg="#0D2017", fg=GREEN,
+            font=(fn, 12),
+        ).pack(side=tk.LEFT, pady=8)
+        tk.Label(
+            content,
+            text=" An update is available for Fairy Start.",
+            bg="#0D2017", fg=GREEN,
+            font=(fn, 11),
+        ).pack(side=tk.LEFT, pady=8)
+        # Update Now button
+        update_btn = CanvasButton(
+            banner, text="Update Now",
+            font=(fn, 11),
+            bg=GREEN, fg="#0D2017",
+            hover_bg="#22C55E", hover_fg="#0D2017",
+            padx=10, pady=3,
+            command=self._on_update_now,
+            parent_bg="#0D2017",
+        )
+        update_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        # Dismiss button
+        dismiss = tk.Label(
+            banner, text="✕",
+            bg="#0D2017", fg=TEXT_SECONDARY,
+            font=(fn, 12), cursor="pointinghand",
+        )
+        dismiss.pack(side=tk.RIGHT, padx=(0, 4))
+        dismiss.bind("<Button-1>", lambda e: self._dismiss_update_banner())
+        dismiss.bind("<Enter>", lambda e: dismiss.configure(fg=TEXT_PRIMARY))
+        dismiss.bind("<Leave>", lambda e: dismiss.configure(fg=TEXT_SECONDARY))
+
+        self._update_banner = banner
+
+    def _show_update_banner(self) -> None:
+        if self._update_banner_visible or self._update_banner is None:
+            return
+        self._update_banner.pack(fill=tk.X, before=self._cards_outer)
+        self._update_banner_visible = True
+
+    def _hide_update_banner(self) -> None:
+        if not self._update_banner_visible or self._update_banner is None:
+            return
+        self._update_banner.pack_forget()
+        self._update_banner_visible = False
+
+    def _dismiss_update_banner(self) -> None:
+        self._hide_update_banner()
+
+    def _start_update_check(self) -> None:
+        self._root.after(self._UPDATE_CHECK_DELAY_MS, self._run_update_check)
+
+    def _run_update_check(self) -> None:
+        def _check():
+            try:
+                script_dir = pathlib.Path(__file__).parent
+                local = subprocess.run(
+                    ["git", "-C", str(script_dir), "rev-parse", "HEAD"],
+                    capture_output=True, timeout=5,
+                )
+                if local.returncode != 0:
+                    return   # not a git repo (e.g. .app bundle)
+                local_sha = local.stdout.decode().strip()
+
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{_FAIRY_START_REPO}/commits/main",
+                    headers={"Accept": "application/vnd.github.sha",
+                             "User-Agent": "fairy-start"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    remote_sha = resp.read().decode().strip()
+
+                if remote_sha and remote_sha != local_sha:
+                    if self._root.winfo_exists():
+                        self._root.after(0, self._show_update_banner)
+            except Exception:
+                pass   # silently ignore: no internet, rate-limited, etc.
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _on_update_now(self) -> None:
+        if not tkinter.messagebox.askyesno(
+            "Update Fairy Start",
+            "Applying the update requires restarting Fairy Start.\n\nUpdate now?",
+            icon="info",
+        ):
+            return
+        self._hide_update_banner()
+
+        def _pull():
+            try:
+                script_dir = pathlib.Path(__file__).parent
+                result = subprocess.run(
+                    ["git", "-C", str(script_dir), "pull", "--ff-only"],
+                    capture_output=True, timeout=30,
+                )
+                if self._root.winfo_exists():
+                    if result.returncode == 0:
+                        self._root.after(0, self._on_update_success)
+                    else:
+                        err = result.stderr.decode(errors="replace").strip()
+                        self._root.after(0, lambda: self._on_update_failed(err))
+            except Exception as exc:
+                if self._root.winfo_exists():
+                    self._root.after(0, lambda: self._on_update_failed(str(exc)))
+        threading.Thread(target=_pull, daemon=True).start()
+
+    def _on_update_success(self) -> None:
+        tkinter.messagebox.showinfo(
+            "Update Applied",
+            "Fairy Start has been updated.\n\nPlease restart the app to use the new version.",
+        )
+
+    def _on_update_failed(self, err: str) -> None:
+        tkinter.messagebox.showerror(
+            "Update Failed",
+            f"git pull failed:\n\n{err}\n\nYou can update manually by running:\n  git pull",
+        )
+
     # ---- Fairy backup -----------------------------------------------
 
     def _start_fairy_backup(self) -> None:
@@ -2503,6 +2684,8 @@ class FairyStartApp:
     def _fairy_backup_loop(self) -> None:
         while not self._fairy_backup_stop.wait(self._FAIRY_BACKUP_INTERVAL):
             for pkg in list(self._config.packages):
+                if not pkg.fairy_backup:
+                    continue
                 pkg_dir = self._packages_dir / pkg.name
                 if pkg_dir.exists():
                     push = "ux-mark/" in pkg.repo
