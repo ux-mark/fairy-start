@@ -18,8 +18,6 @@ The build script installs everything it needs (Python, gh CLI) automatically. Wh
 
 <br clear="right" />
 
----
-
 ## Add your services
 
 Once the app is open, click **+** to add a GitHub repo:
