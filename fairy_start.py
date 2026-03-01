@@ -1029,7 +1029,11 @@ class PackageConfig:
     branch: str
     start_command: str
     url: Optional[str] = None
-    fairy_backup: bool = True
+    fairy_backup: bool = False
+
+    def __post_init__(self) -> None:
+        if self.url and not self.url.startswith(("http://", "https://")):
+            self.url = f"http://{self.url}"
 
     @property
     def github_url(self) -> str:
@@ -1057,7 +1061,7 @@ class Config:
                 branch=entry.get("branch", "main"),
                 start_command=entry.get("start_command", ""),
                 url=entry.get("url"),
-                fairy_backup=entry.get("fairy_backup", True),
+                fairy_backup=entry.get("fairy_backup", False),
             ))
         return cls(packages_dir=packages_dir, packages=pkgs)
 
@@ -1117,6 +1121,20 @@ def gh_auth_status() -> str:
     except subprocess.TimeoutExpired:
         return "unauthenticated"
     return "authenticated" if result.returncode == 0 else "unauthenticated"
+
+
+def gh_list_branches(owner: str, repo: str, max_pages: int = 3) -> list[str]:
+    """Return sorted branch names for *owner/repo* (up to *max_pages* × 100)."""
+    names: list[str] = []
+    for page in range(1, max_pages + 1):
+        data = gh_api(f"repos/{owner}/{repo}/branches?per_page=100&page={page}")
+        if not isinstance(data, list) or not data:
+            break
+        names.extend(b["name"] for b in data if isinstance(b, dict) and "name" in b)
+        if len(data) < 100:
+            break
+    names.sort(key=str.casefold)
+    return names
 
 
 def gh_file_content(owner: str, repo: str, path: str) -> Optional[str]:
@@ -1346,6 +1364,8 @@ def append_package_to_config(config_path: pathlib.Path, pkg: PackageConfig) -> N
     ]
     if pkg.url:
         lines.append(f'url           = "{_toml_str(pkg.url)}"')
+    if pkg.fairy_backup:
+        lines.append(f'fairy_backup  = true')
     with config_path.open("a") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -1370,8 +1390,8 @@ def rewrite_config(
         ]
         if pkg.url:
             lines.append(f'url           = "{_toml_str(pkg.url)}"')
-        if not pkg.fairy_backup:
-            lines.append(f'fairy_backup  = false')
+        if pkg.fairy_backup:
+            lines.append(f'fairy_backup  = true')
     config_path.write_text("\n".join(lines) + "\n")
 
 
@@ -1535,7 +1555,7 @@ class ProcessManager:
     def start_one(self, pkg: PackageConfig) -> None:
         pkg_dir = self._packages_dir / pkg.name
         log_path = pkg_dir / "fairy-start.log"
-        log_fh = log_path.open("a")
+        log_fh = log_path.open("w")
         self._log_fhs[pkg.name] = log_fh
         proc = subprocess.Popen(
             shlex.split(pkg.start_command),
@@ -1550,21 +1570,29 @@ class ProcessManager:
         proc = self._procs.pop(pkg_name, None)
         if proc is None:
             return
+        # With start_new_session=True the PID *is* the PGID.  Try to kill
+        # the whole group so orphaned children (e.g. sync.py) are cleaned up
+        # even when the leader has already exited.
+        pgid = proc.pid
         if proc.poll() is None:
             try:
-                pgid = os.getpgid(proc.pid)
                 os.killpg(pgid, signal.SIGTERM)
             except OSError:
                 try:
                     proc.terminate()
                 except OSError:
                     pass
+        else:
+            # Leader already dead — still try to reap orphaned children.
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
         try:
             proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             if proc.poll() is None:
                 try:
-                    pgid = os.getpgid(proc.pid)
                     os.killpg(pgid, signal.SIGKILL)
                 except OSError:
                     try:
@@ -1609,6 +1637,12 @@ def _pkg_worker(
         _deadline = time.monotonic() + 1.5
         while time.monotonic() < _deadline:
             if pm.poll_one(pkg.name) is not None:
+                # For URL-equipped services the process may exit immediately
+                # due to a debug-reloader restart (Python 3.14 semaphore
+                # issue).  Don't treat this as a fatal error — post RUNNING
+                # and let the monitor loop handle the restart.
+                if pkg.url:
+                    break
                 log_path = pkg_dir / "fairy-start.log"
                 try:
                     log_text = log_path.read_text(errors="replace")
@@ -1949,6 +1983,8 @@ class AddServiceDialog:
 class EditServiceDialog:
     """Modal for editing branch, start command, and URL of an existing service."""
 
+    _POLL_MS = 100
+
     def __init__(
         self,
         parent: tk.Tk,
@@ -1959,6 +1995,8 @@ class EditServiceDialog:
         self._pkg = pkg
         self._on_confirm = on_confirm
         self._font_name = font_name
+        self._branches: list[str] = []
+        self._branch_queue: queue.Queue = queue.Queue()
 
         top = tk.Toplevel(parent)
         top.title(f"Edit — {pkg.name}")
@@ -1968,6 +2006,7 @@ class EditServiceDialog:
         top.transient(parent)
         self._top = top
         self._build_ui()
+        self._fetch_branches()
 
     def _build_ui(self) -> None:
         fn = self._font_name
@@ -2016,8 +2055,31 @@ class EditServiceDialog:
         cmd_var    = tk.StringVar(value=pkg.start_command)
         url_var    = tk.StringVar(value=pkg.url or "")
         fairy_backup_var = tk.BooleanVar(value=pkg.fairy_backup)
+        self._branch_var = branch_var
 
-        _field("Branch", branch_var)
+        # Branch row: Entry + dropdown button
+        branch_row = tk.Frame(frame, bg=CARD_BG)
+        branch_row.pack(fill=tk.X, pady=3)
+        tk.Label(branch_row, text="Branch", bg=CARD_BG, fg=TEXT_SECONDARY,
+                 font=(fn, 10), width=14, anchor="e").pack(side=tk.LEFT)
+        tk.Entry(
+            branch_row, textvariable=branch_var, font=(fn, 12), width=24,
+            relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=CARD_BORDER, highlightcolor=BLUE,
+            bg=INPUT_BG, fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+        ).pack(side=tk.LEFT, padx=(8, 0), ipady=5)
+        dropdown_btn = CanvasButton(
+            branch_row, text="\u25be", font=(fn, 10),
+            command=self._show_branch_menu,
+            bg=CARD_BORDER, fg=TEXT_SECONDARY,
+            hover_bg=CARD_BORDER_HOVER, hover_fg=TEXT_PRIMARY,
+            padx=6, pady=5, parent_bg=CARD_BG,
+        )
+        dropdown_btn.configure(state=tk.DISABLED)
+        dropdown_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self._dropdown_btn = dropdown_btn
+
         _field("Start command", cmd_var, highlight_empty=True)
         _field("URL", url_var)
 
@@ -2072,6 +2134,58 @@ class EditServiceDialog:
             save_btn.configure(state=tk.NORMAL if cmd_var.get().strip() else tk.DISABLED)
         cmd_var.trace_add("write", _check)
 
+    # ---- Branch dropdown async fetch ------------------------------------
+
+    def _fetch_branches(self) -> None:
+        pkg = self._pkg
+        try:
+            owner, repo = parse_github_input(pkg.repo)
+        except ValueError:
+            return  # can't parse repo — dropdown stays disabled
+
+        def _worker() -> None:
+            try:
+                branches = gh_list_branches(owner, repo)
+                self._branch_queue.put(("ok", branches))
+            except Exception:
+                self._branch_queue.put(("error", None))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._top.after(self._POLL_MS, self._poll_branches)
+
+    def _poll_branches(self) -> None:
+        if not self._top.winfo_exists():
+            return
+        try:
+            msg = self._branch_queue.get_nowait()
+            if msg[0] == "ok" and msg[1]:
+                self._branches = msg[1]
+                self._dropdown_btn.configure(state=tk.NORMAL)
+            return  # done polling
+        except queue.Empty:
+            pass
+        self._top.after(self._POLL_MS, self._poll_branches)
+
+    def _show_branch_menu(self) -> None:
+        if not self._branches:
+            return
+        menu = tk.Menu(self._top, tearoff=False,
+                       bg=CARD_BG, fg=TEXT_PRIMARY,
+                       activebackground=CARD_BORDER,
+                       activeforeground=TEXT_PRIMARY)
+        current = self._branch_var.get().strip()
+        for name in self._branches:
+            label = f"\u2713  {name}" if name == current else f"    {name}"
+            menu.add_command(
+                label=label,
+                command=lambda n=name: self._branch_var.set(n),
+            )
+        # Position the menu below the dropdown button
+        btn_canvas = self._dropdown_btn._canvas
+        x = btn_canvas.winfo_rootx()
+        y = btn_canvas.winfo_rooty() + btn_canvas.winfo_height()
+        menu.post(x, y)
+
     def _save(self, branch_var: tk.StringVar, cmd_var: tk.StringVar,
               url_var: tk.StringVar, fairy_backup_var: tk.BooleanVar) -> None:
         branch       = branch_var.get().strip() or "main"
@@ -2093,11 +2207,13 @@ _FAIRY_START_REPO = "ux-mark/fairy-start"
 
 class FairyStartApp:
     _POLL_MS              = 100
-    _HEALTH_INTERVAL      = 5.0
+    _HEALTH_INTERVAL      = 1.0
     _MONITOR_POLL         = 2.0
     _FAIRY_BACKUP_INTERVAL = 300.0
     _AUTH_RECHECK_MS      = 30_000
     _UPDATE_CHECK_DELAY_MS = 2_000
+    _MAX_AUTO_RESTARTS    = 5
+    _AUTO_RESTART_WINDOW  = 60.0
 
     def __init__(self, config: Config, config_path: pathlib.Path) -> None:
         self._config = config
@@ -2109,6 +2225,8 @@ class FairyStartApp:
         self._pkg_states: dict[str, PkgState] = {p.name: PkgState.OFF for p in config.packages}
         self._pkg_stop_events: dict[str, threading.Event] = {}
         self._stopping: set[str] = set()
+        self._auto_restart_times: dict[str, list[float]] = {}
+        self._ever_healthy: dict[str, bool] = {}
         self._ui_queue: queue.Queue = queue.Queue()
         self._fairy_backup_stop = threading.Event()
 
@@ -2374,13 +2492,21 @@ class FairyStartApp:
             )
             url_lbl.pack(side=tk.LEFT)
 
-        backup_off_lbl = tk.Label(
-            row2, text="backup off",
+        backup_on_lbl = tk.Label(
+            row2, text="backup on",
             bg=CARD_BG, fg=TEXT_TERTIARY,
             font=(fn, 9), anchor="w",
         )
-        if not pkg.fairy_backup:
-            backup_off_lbl.pack(side=tk.LEFT, padx=(6, 0))
+        if pkg.fairy_backup:
+            backup_on_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+        branch_lbl = tk.Label(
+            row2, text=pkg.branch,
+            bg=CARD_BG, fg=TEXT_TERTIARY,
+            font=(fn, 9), anchor="w",
+        )
+        if pkg.branch != "main":
+            branch_lbl.pack(side=tk.LEFT, padx=(6, 0))
 
         # ── Inline Edit / Remove links (always visible, right-aligned) ──
         _rlf  = tkfont.Font(family=fn, size=10)
@@ -2414,6 +2540,10 @@ class FairyStartApp:
         ctx_menu.add_command(
             label="Edit service…",
             command=lambda n=pkg.name: self._on_edit_service(n),
+        )
+        ctx_menu.add_command(
+            label="Copy debug info",
+            command=lambda n=pkg.name: self._ctx_copy_debug(n),
         )
         ctx_menu.add_separator()
         ctx_menu.add_command(
@@ -2460,6 +2590,27 @@ class FairyStartApp:
         edit_adv_btn.bind("<Enter>", lambda e, b=edit_adv_btn, f=_eafu: b.configure(font=f))
         edit_adv_btn.bind("<Leave>", lambda e, b=edit_adv_btn, f=_eaf:  b.configure(font=f))
 
+        copy_debug_link = tk.Label(
+            adv_action_row, text="Copy debug info",
+            bg=CARD_BG, fg=TEXT_SECONDARY,
+            font=_eaf, cursor="pointinghand",
+        )
+        copy_debug_link.pack(side=tk.LEFT, padx=(0, 16))
+        copy_debug_link.bind("<Enter>", lambda e, b=copy_debug_link, f=_eafu: b.configure(font=f))
+        copy_debug_link.bind("<Leave>", lambda e, b=copy_debug_link, f=_eaf:  b.configure(font=f))
+
+        def _copy_debug(n: str = pkg.name) -> None:
+            info = self._build_debug_text(n)
+            self._root.clipboard_clear()
+            self._root.clipboard_append(info)
+            copy_debug_link.configure(text="Copied", fg=BLUE)
+            def _revert() -> None:
+                if copy_debug_link.winfo_exists():
+                    copy_debug_link.configure(text="Copy debug info", fg=TEXT_SECONDARY)
+            self._root.after(1500, _revert)
+
+        copy_debug_link.bind("<Button-1>", lambda e: _copy_debug())
+
         log_toggle = tk.Label(
             adv_action_row, text="Show log",
             bg=CARD_BG, fg=TEXT_SECONDARY,
@@ -2468,14 +2619,62 @@ class FairyStartApp:
         log_toggle.pack(side=tk.LEFT)
 
         log_frame = tk.Frame(advisory_outer, bg=CARD_BG)
+
+        # Container so we can overlay the copy icon on the log text
+        log_container = tk.Frame(log_frame, bg=LOG_BG)
+        log_container.pack(fill=tk.X, padx=16, pady=(0, 8))
+
         log_lbl = tk.Label(
-            log_frame, text="",
+            log_container, text="",
             bg=LOG_BG, fg=TEXT_SECONDARY,
             font=(self._mono_font, 9),
             wraplength=356, justify="left", anchor="w",
             padx=12, pady=8,
         )
-        log_lbl.pack(fill=tk.X, padx=16, pady=(0, 8))
+        log_lbl.pack(fill=tk.X)
+
+        # Copy icon overlaid on top-right of the log area
+        _COPY_SZ = 26
+        copy_log_canvas = tk.Canvas(
+            log_container, width=_COPY_SZ, height=_COPY_SZ,
+            bg=LOG_BG, highlightthickness=0, cursor="pointinghand",
+        )
+        copy_log_canvas.place(relx=1.0, x=-8, y=6, anchor="ne")
+
+        def _draw_copy_icon(color: str = TEXT_SECONDARY) -> None:
+            copy_log_canvas.delete("icon")
+            # Back rectangle (offset down-right)
+            copy_log_canvas.create_rectangle(
+                9, 9, 22, 22, outline=color, width=1.5, tags=("icon",),
+            )
+            # Front rectangle (offset up-left) with filled bg
+            copy_log_canvas.create_rectangle(
+                4, 4, 17, 17, outline=color, fill=LOG_BG, width=1.5, tags=("icon",),
+            )
+
+        def _draw_check_icon(color: str = BLUE) -> None:
+            copy_log_canvas.delete("icon")
+            copy_log_canvas.create_line(
+                7, 13, 11, 18, 19, 8,
+                fill=color, width=2, capstyle="round", joinstyle="round",
+                tags=("icon",),
+            )
+
+        _draw_copy_icon()
+
+        def _copy_log(n: str = pkg.name) -> None:
+            text = self._read_log_tail(n)
+            self._root.clipboard_clear()
+            self._root.clipboard_append(text)
+            _draw_check_icon()
+            def _revert() -> None:
+                if copy_log_canvas.winfo_exists():
+                    _draw_copy_icon()
+            self._root.after(1500, _revert)
+
+        copy_log_canvas.bind("<Button-1>", lambda e: _copy_log())
+        copy_log_canvas.bind("<Enter>", lambda e: _draw_copy_icon(TEXT_PRIMARY))
+        copy_log_canvas.bind("<Leave>", lambda e: _draw_copy_icon())
 
         # ── Bottom padding ────────────────────────────────────────────
         bottom_pad = tk.Frame(card, bg=CARD_BG, height=14)
@@ -2538,14 +2737,18 @@ class FairyStartApp:
             "action_btn":      action_btn,
             "name_lbl":        name_lbl,
             "url_lbl":         url_lbl,
-            "backup_off_lbl":  backup_off_lbl,
+            "backup_on_lbl":   backup_on_lbl,
+            "branch_lbl":     branch_lbl,
             "advisory_outer": advisory_outer,
             "advisory_sep":  advisory_sep,
             "advisory_lbl":   advisory_lbl,
             "advisory_inner": advisory_inner,
             "left_bar":       left_bar,
+            "copy_debug_link": copy_debug_link,
             "log_toggle":     log_toggle,
             "log_frame":      log_frame,
+            "log_container":  log_container,
+            "copy_log_canvas": copy_log_canvas,
             "log_lbl":        log_lbl,
             "accordion_open": accordion_open,
             "_row1":          row1,
@@ -2753,7 +2956,7 @@ class FairyStartApp:
             current_fg = str(w["url_lbl"].cget("fg"))
             if current_fg != BLUE and current_fg != str(BLUE):
                 w["url_lbl"].configure(fg=TEXT_TERTIARY)
-        w["backup_off_lbl"].configure(bg=CARD_BG, fg=TEXT_TERTIARY)
+        w["backup_on_lbl"].configure(bg=CARD_BG, fg=TEXT_TERTIARY)
 
         # Indent spacer in row2
         for child in w["_row2"].winfo_children():
@@ -2780,8 +2983,19 @@ class FairyStartApp:
         w["advisory_sep"].configure(bg=CARD_BORDER)
         w["adv_action_row"].configure(bg=CARD_BG)
         w["edit_adv_btn"].configure(bg=CARD_BG, fg=BLUE)
+        w["copy_debug_link"].configure(bg=CARD_BG, fg=TEXT_SECONDARY)
         w["log_toggle"].configure(bg=CARD_BG, fg=TEXT_SECONDARY)
         w["log_frame"].configure(bg=CARD_BG)
+        w["log_container"].configure(bg=LOG_BG)
+        w["copy_log_canvas"].configure(bg=LOG_BG)
+        w["copy_log_canvas"].delete("icon")
+        # Redraw copy icon with current theme colors
+        w["copy_log_canvas"].create_rectangle(
+            9, 9, 22, 22, outline=TEXT_SECONDARY, width=1.5, tags=("icon",),
+        )
+        w["copy_log_canvas"].create_rectangle(
+            4, 4, 17, 17, outline=TEXT_SECONDARY, fill=LOG_BG, width=1.5, tags=("icon",),
+        )
         w["log_lbl"].configure(bg=LOG_BG, fg=TEXT_SECONDARY)
 
         # Advisory inner: depends on current advisory state
@@ -2799,6 +3013,8 @@ class FairyStartApp:
 
     def _apply_pkg_health(self, pkg_name: str, status: int) -> None:
         """Updates dot animation + URL link based on HTTP health. Main thread only."""
+        if 200 <= status < 500:
+            self._ever_healthy[pkg_name] = True
         if self._pkg_states.get(pkg_name) != PkgState.RUNNING:
             return
         w = self._pkg_widgets.get(pkg_name)
@@ -2856,11 +3072,13 @@ class FairyStartApp:
 
         else:
             # Healthy — but verify we don't have a port-conflict false positive
-            log_text = self._read_log_tail(pkg_name)
-            if re.search(r'EADDRINUSE|address already in use', log_text, re.IGNORECASE):
-                self._set_pkg_state(pkg_name, PkgState.ERROR)
-                self._signal_stop_event(pkg_name)
-                return
+            if not self._ever_healthy.get(pkg_name, False):
+                log_text = self._read_log_tail(pkg_name)
+                if re.search(r'EADDRINUSE|address already in use', log_text, re.IGNORECASE):
+                    self._set_pkg_state(pkg_name, PkgState.ERROR)
+                    self._signal_stop_event(pkg_name)
+                    return
+            self._ever_healthy[pkg_name] = True
             w["dot_animator"].set_state(PkgState.RUNNING, self._root)
             if w["url_lbl"] is not None and pkg and pkg.url:
                 _pm = re.search(r':(\d+)', pkg.url)
@@ -2932,6 +3150,11 @@ class FairyStartApp:
                         if pkg_name not in self._stopping:
                             self._set_pkg_state(pkg_name, PkgState.ERROR, log_tail)
 
+                    elif msg[0] == "pkg_auto_restart":
+                        _, pkg_name = msg
+                        if pkg_name not in self._stopping:
+                            self._handle_auto_restart(pkg_name)
+
                 except Exception as exc:
                     print(f"[Fairy Start] error handling {msg[0]!r} for {msg[1]!r}: {exc}",
                           file=sys.stderr)
@@ -2957,6 +3180,8 @@ class FairyStartApp:
         stop_event = threading.Event()
         self._pkg_stop_events[pkg_name] = stop_event
         self._stopping.discard(pkg_name)
+        self._auto_restart_times.pop(pkg_name, None)
+        self._ever_healthy.pop(pkg_name, None)
 
         self._set_pkg_state(pkg_name, PkgState.STARTING)
 
@@ -2965,6 +3190,8 @@ class FairyStartApp:
             args=(pkg, self._packages_dir, self._pm, self._ui_queue),
             daemon=True,
         ).start()
+
+        self._start_health_check(pkg_name)
 
         threading.Thread(
             target=self._pkg_monitor_loop,
@@ -3014,6 +3241,59 @@ class FairyStartApp:
             self._ui_queue.put(("pkg_health", pkg_name, status))
             stop_event.wait(self._HEALTH_INTERVAL)
 
+    # ---- Auto-restart for reloader-triggered exits ---------------------
+
+    def _handle_auto_restart(self, pkg_name: str) -> None:
+        """Re-launch a URL-equipped service whose process exited (reloader).
+
+        Flask/uvicorn debug reloaders can cause the entire process tree to
+        exit on Python 3.14 (semaphore cleanup issue).  Instead of showing
+        an error, silently restart the service.
+
+        If the health check confirmed the service was healthy at least once,
+        always restart — the service demonstrably works and just needs a
+        bounce.  If it was *never* healthy, apply the rate limit
+        (_MAX_AUTO_RESTARTS in _AUTO_RESTART_WINDOW) and give up if exceeded.
+        """
+        if not self._ever_healthy.get(pkg_name, False):
+            now = time.monotonic()
+            times = self._auto_restart_times.setdefault(pkg_name, [])
+            times[:] = [t for t in times if now - t < self._AUTO_RESTART_WINDOW]
+
+            if len(times) >= self._MAX_AUTO_RESTARTS:
+                log_tail = self._read_log_tail(pkg_name)
+                self._set_pkg_state(pkg_name, PkgState.ERROR, log_tail)
+                self._signal_stop_event(pkg_name)
+                return
+
+            times.append(now)
+
+        pkg = next((p for p in self._config.packages if p.name == pkg_name), None)
+        if pkg is None:
+            return
+
+        # Tear down old threads and dead process handle.
+        self._signal_stop_event(pkg_name)
+        self._pm.stop_one(pkg_name)
+
+        # Start fresh process + new monitor/health-check threads.
+        stop_event = threading.Event()
+        self._pkg_stop_events[pkg_name] = stop_event
+
+        self._pm.start_one(pkg)
+
+        # Ensure state is RUNNING (may have been set to ERROR by a race
+        # with _pkg_worker before we got here).
+        if self._pkg_states.get(pkg_name) != PkgState.RUNNING:
+            self._set_pkg_state(pkg_name, PkgState.RUNNING)
+
+        threading.Thread(
+            target=self._pkg_monitor_loop,
+            args=(pkg_name, stop_event),
+            daemon=True,
+        ).start()
+        self._start_health_check(pkg_name)
+
     # ---- Per-package process monitor --------------------------------
 
     def _pkg_monitor_loop(self, pkg_name: str, stop_event: threading.Event) -> None:
@@ -3025,11 +3305,29 @@ class FairyStartApp:
         if stop_event.is_set():
             return
 
+        # Check whether this package has a URL — used to decide whether a
+        # process exit should trigger an automatic restart (reloader pattern)
+        # or an immediate error report.
+        pkg_cfg = next(
+            (p for p in self._config.packages if p.name == pkg_name), None
+        )
+        has_url = bool(pkg_cfg and pkg_cfg.url)
+
         while not stop_event.wait(self._MONITOR_POLL):
             ret = self._pm.poll_one(pkg_name)
             if ret is not None:
                 if stop_event.is_set():
                     return
+
+                # Flask/uvicorn debug reloaders kill and respawn the server
+                # child process when files change.  On Python 3.14 this can
+                # cause the entire process tree to exit.  For URL-equipped
+                # services, silently restart instead of declaring a crash.
+                # The start command's lsof-kill handles port cleanup.
+                if has_url:
+                    self._ui_queue.put(("pkg_auto_restart", pkg_name))
+                    return
+
                 log_tail = self._read_log_tail(pkg_name)
                 self._ui_queue.put(("pkg_exited", pkg_name, log_tail))
                 return
@@ -3038,6 +3336,37 @@ class FairyStartApp:
         ev = self._pkg_stop_events.get(pkg_name)
         if ev:
             ev.set()
+
+    # ---- Clipboard helpers -------------------------------------------
+
+    def _build_debug_text(self, pkg_name: str) -> str:
+        pkg = next((p for p in self._config.packages if p.name == pkg_name), None)
+        if not pkg:
+            return ""
+        state = self._pkg_states.get(pkg_name, PkgState.OFF)
+        w = self._pkg_widgets.get(pkg_name, {})
+        advisory_lbl = w.get("advisory_lbl")
+        advisory_text = advisory_lbl.cget("text") if advisory_lbl else ""
+
+        lines = [f"--- Fairy Start: {pkg.name} ---"]
+        if pkg.url:
+            lines.append(f"URL:     {pkg.url}")
+        if pkg.branch:
+            lines.append(f"Branch:  {pkg.branch}")
+        lines.append(f"Status:  {PILL_LABELS.get(state, str(state))}")
+        if advisory_text:
+            lines.append(f"\n{advisory_text}")
+        log_text = self._read_log_tail(pkg_name)
+        if log_text:
+            lines.append(f"\nLog (last 8 lines):")
+            for log_line in log_text.splitlines():
+                lines.append(f"  {log_line}")
+        return "\n".join(lines)
+
+    def _ctx_copy_debug(self, pkg_name: str) -> None:
+        info = self._build_debug_text(pkg_name)
+        self._root.clipboard_clear()
+        self._root.clipboard_append(info)
 
     # ---- Log reading ------------------------------------------------
 
@@ -3094,12 +3423,19 @@ class FairyStartApp:
                 _pm = re.search(r':(\d+)', url)
                 new_text = f"localhost:{_pm.group(1)}" if _pm else url
                 w["url_lbl"].configure(text=new_text)
-            # Update backup_off_lbl visibility
-            if w and w.get("backup_off_lbl"):
+            # Update backup_on_lbl visibility
+            if w and w.get("backup_on_lbl"):
                 if fairy_backup:
-                    w["backup_off_lbl"].pack_forget()
+                    w["backup_on_lbl"].pack(side=tk.LEFT, padx=(6, 0))
                 else:
-                    w["backup_off_lbl"].pack(side=tk.LEFT, padx=(6, 0))
+                    w["backup_on_lbl"].pack_forget()
+            # Update branch_lbl text and visibility
+            if w and w.get("branch_lbl"):
+                w["branch_lbl"].configure(text=branch)
+                if branch != "main":
+                    w["branch_lbl"].pack(side=tk.LEFT, padx=(6, 0))
+                else:
+                    w["branch_lbl"].pack_forget()
 
         EditServiceDialog(self._root, pkg, _on_confirm, self._font_name)
 
