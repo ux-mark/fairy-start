@@ -7,6 +7,7 @@ import base64
 import enum
 import dataclasses
 import json
+import math
 import os
 import pathlib
 import queue
@@ -138,7 +139,7 @@ def _macos_configure_titlebar(root: "tk.Tk") -> None:
         new_mask = current_mask | (1 << 15)
         _msg(None, win, b"setStyleMask:", ctypes.c_uint64(new_mask))
 
-        # backgroundColor — parse WINDOW_BG (#1E1E24) into NSColor
+        # backgroundColor — parse WINDOW_BG into NSColor
         bg = WINDOW_BG.lstrip("#")
         r = int(bg[0:2], 16) / 255.0
         g = int(bg[2:4], 16) / 255.0
@@ -155,6 +156,70 @@ def _macos_configure_titlebar(root: "tk.Tk") -> None:
         # movableByWindowBackground = YES
         _msg(None, win, b"setMovableByWindowBackground:", ctypes.c_bool(True))
 
+    except Exception:
+        pass
+
+
+def _macos_set_titlebar_bg(root: "tk.Tk", hex_color: str) -> None:
+    """Set the NSWindow background color to match the given hex color."""
+    import sys
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        objc = ctypes.cdll.LoadLibrary("libobjc.dylib")
+        objc.objc_getClass.restype    = ctypes.c_void_p
+        objc.objc_getClass.argtypes   = [ctypes.c_char_p]
+        objc.sel_registerName.restype  = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def _msg(restype, obj, sel_bytes, *args):
+            fn = objc.objc_msgSend
+            fn.restype  = restype
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [type(a) for a in args]
+            return fn(obj, objc.sel_registerName(sel_bytes), *args)
+
+        NSApp = objc.objc_getClass(b"NSApplication")
+        app   = _msg(ctypes.c_void_p, NSApp, b"sharedApplication")
+        wins  = _msg(ctypes.c_void_p, app,   b"windows")
+        count = _msg(ctypes.c_uint64, wins,  b"count")
+        if count == 0:
+            return
+
+        win = None
+        title = root.title()
+        for i in range(count):
+            w = _msg(ctypes.c_void_p, wins, b"objectAtIndex:",
+                     ctypes.c_uint64(i))
+            if not w:
+                continue
+            ns_title = _msg(ctypes.c_void_p, w, b"title")
+            if not ns_title:
+                continue
+            utf8 = _msg(ctypes.c_char_p, ns_title, b"UTF8String")
+            if utf8 and utf8.decode("utf-8", errors="replace") == title:
+                win = w
+                break
+
+        if not win:
+            win = _msg(ctypes.c_void_p, wins, b"objectAtIndex:",
+                       ctypes.c_uint64(0))
+        if not win:
+            return
+
+        bg = hex_color.lstrip("#")
+        r = int(bg[0:2], 16) / 255.0
+        g = int(bg[2:4], 16) / 255.0
+        b_val = int(bg[4:6], 16) / 255.0
+        NSColor = objc.objc_getClass(b"NSColor")
+        color = _msg(
+            ctypes.c_void_p, NSColor,
+            b"colorWithRed:green:blue:alpha:",
+            ctypes.c_double(r), ctypes.c_double(g),
+            ctypes.c_double(b_val), ctypes.c_double(1.0),
+        )
+        _msg(None, win, b"setBackgroundColor:", ctypes.c_void_p(color))
     except Exception:
         pass
 
@@ -178,30 +243,203 @@ class _DialogState(enum.Enum):
 
 
 # ---------------------------------------------------------------------------
-# UI constants — dark theme
+# UI constants — palette system (light + dark)
 # ---------------------------------------------------------------------------
 
-WINDOW_BG         = "#1E1E24"
-CARD_BG           = "#2A2A32"
-CARD_BORDER       = "#3A3A44"
-CARD_BORDER_HOVER = "#52525B"
-HEADER_BG         = "#1E1E24"
+_DARK: dict[str, str] = {
+    "WINDOW_BG":         "#1E1E24",
+    "CARD_BG":           "#2A2A32",
+    "CARD_BORDER":       "#3A3A44",
+    "CARD_BORDER_HOVER": "#52525B",
+    "HEADER_BG":         "#1E1E24",
 
-TEXT_PRIMARY   = "#F5F5F7"
-TEXT_SECONDARY = "#A0A0AB"
-TEXT_TERTIARY  = "#6B6B76"
+    "TEXT_PRIMARY":   "#F5F5F7",
+    "TEXT_SECONDARY": "#A0A0AB",
+    "TEXT_TERTIARY":  "#9090A0",
 
-BLUE          = "#5B8DEF"
-BLUE_HOVER    = "#7BA4F7"
-RED           = "#F87171"
-RED_HOVER     = "#EF4444"
-STOP_BG       = "#DC2626"
-DISABLED_BG   = "#3A3A44"
-DISABLED_TEXT = "#6B6B76"
+    "BLUE":          "#4070CF",
+    "BLUE_HOVER":    "#4575C5",
+    "RED":           "#F87171",
+    "RED_HOVER":     "#EF4444",
+    "STOP_BG":       "#DC2626",
+    "DISABLED_BG":   "#3A3A44",
+    "DISABLED_TEXT":  "#8E8E99",
 
-GREEN      = "#4ADE80"
-GREEN_GLOW = "#1A5C32"
-AMBER      = "#FBBF24"
+    "GREEN":      "#4ADE80",
+    "GREEN_GLOW": "#1A5C32",
+    "AMBER":      "#FBBF24",
+
+    "INPUT_BG":      "#1A1A22",
+    "LOG_BG":        "#16161C",
+    "BTN_TEXT":      "#FFFFFF",
+
+    "ERROR_BG":      "#450A0A",
+    "ERROR_TEXT":     "#FCA5A5",
+    "WARNING_BG":    "#422006",
+    "WARNING_TEXT":   "#FCD34D",
+
+    "AUTH_BANNER_BG":   "#2A1A00",
+    "UPDATE_BANNER_BG": "#0D2017",
+
+    "REMOVE_LINK":       "#F87171",
+    "REMOVE_LINK_HOVER": "#F87171",
+    "GREEN_HOVER":       "#22C55E",
+    "AMBER_HOVER":       "#F59E0B",
+    "PULSE_BRIGHT":      "#9CA3AF",
+
+    # Pill colors: (bg, fg) per state
+    "PILL_OFF_BG":      "#3A3A44",
+    "PILL_OFF_FG":      "#ABABBA",
+    "PILL_STARTING_BG": "#422006",
+    "PILL_STARTING_FG": "#FCD34D",
+    "PILL_RUNNING_BG":  "#052E16",
+    "PILL_RUNNING_FG":  "#86EFAC",
+    "PILL_ERROR_BG":    "#450A0A",
+    "PILL_ERROR_FG":    "#FCA5A5",
+
+    # Dot colors per state
+    "DOT_OFF":      "#78788A",
+    "DOT_STARTING": "#FBBF24",
+    "DOT_RUNNING":  "#4ADE80",
+    "DOT_ERROR":    "#F87171",
+
+    # Banner / keyline text
+    "AUTH_BANNER_TEXT":   "#FBBF24",
+    "UPDATE_BANNER_TEXT": "#4ADE80",
+    "AMBER_BTN_FG":      "#FFFFFF",
+    "GREEN_BTN_FG":      "#FFFFFF",
+    "BLUE_TEXT":         "#5B8DEF",
+    "RED_TEXT":          "#F87171",
+}
+
+_LIGHT: dict[str, str] = {
+    "WINDOW_BG":         "#F5F5F7",
+    "CARD_BG":           "#FFFFFF",
+    "CARD_BORDER":       "#E5E7EB",
+    "CARD_BORDER_HOVER": "#D1D5DB",
+    "HEADER_BG":         "#F5F5F7",
+
+    "TEXT_PRIMARY":   "#1F2937",
+    "TEXT_SECONDARY": "#636B78",
+    "TEXT_TERTIARY":  "#6A7276",
+
+    "BLUE":          "#2D6BD9",
+    "BLUE_HOVER":    "#2563EB",
+    "RED":           "#EF4444",
+    "RED_HOVER":     "#DC2626",
+    "STOP_BG":       "#DC2626",
+    "DISABLED_BG":   "#E5E7EB",
+    "DISABLED_TEXT":  "#7A828E",
+
+    "GREEN":      "#22C55E",
+    "GREEN_GLOW": "#BBF7D0",
+    "AMBER":      "#F59E0B",
+
+    "INPUT_BG":      "#FFFFFF",
+    "LOG_BG":        "#F3F4F6",
+    "BTN_TEXT":      "#FFFFFF",
+
+    "ERROR_BG":      "#FEE2E2",
+    "ERROR_TEXT":     "#B91C1C",
+    "WARNING_BG":    "#FEF3C7",
+    "WARNING_TEXT":   "#92400E",
+
+    "AUTH_BANNER_BG":   "#FEF3C7",
+    "UPDATE_BANNER_BG": "#DCFCE7",
+
+    "REMOVE_LINK":       "#DC2626",
+    "REMOVE_LINK_HOVER": "#EF4444",
+    "GREEN_HOVER":       "#16A34A",
+    "AMBER_HOVER":       "#D97706",
+    "PULSE_BRIGHT":      "#6B7280",
+
+    # Pill colors: (bg, fg) per state
+    "PILL_OFF_BG":      "#E5E7EB",
+    "PILL_OFF_FG":      "#585F6C",
+    "PILL_STARTING_BG": "#FEF3C7",
+    "PILL_STARTING_FG": "#92400E",
+    "PILL_RUNNING_BG":  "#DCFCE7",
+    "PILL_RUNNING_FG":  "#166534",
+    "PILL_ERROR_BG":    "#FEE2E2",
+    "PILL_ERROR_FG":    "#B91C1C",
+
+    # Dot colors per state
+    "DOT_OFF":      "#848B97",
+    "DOT_STARTING": "#F59E0B",
+    "DOT_RUNNING":  "#22C55E",
+    "DOT_ERROR":    "#EF4444",
+
+    # Banner / keyline text
+    "AUTH_BANNER_TEXT":   "#854D0E",
+    "UPDATE_BANNER_TEXT": "#166534",
+    "AMBER_BTN_FG":      "#422006",
+    "GREEN_BTN_FG":      "#052E16",
+    "BLUE_TEXT":         "#2D6BD9",
+    "RED_TEXT":          "#B91C1C",
+}
+
+# Module-level color globals — updated by _apply_palette()
+WINDOW_BG = CARD_BG = CARD_BORDER = CARD_BORDER_HOVER = HEADER_BG = ""
+TEXT_PRIMARY = TEXT_SECONDARY = TEXT_TERTIARY = ""
+BLUE = BLUE_HOVER = RED = RED_HOVER = STOP_BG = DISABLED_BG = DISABLED_TEXT = ""
+GREEN = GREEN_GLOW = AMBER = ""
+INPUT_BG = LOG_BG = BTN_TEXT = ""
+ERROR_BG = ERROR_TEXT = WARNING_BG = WARNING_TEXT = ""
+AUTH_BANNER_BG = UPDATE_BANNER_BG = ""
+REMOVE_LINK = REMOVE_LINK_HOVER = GREEN_HOVER = AMBER_HOVER = PULSE_BRIGHT = ""
+AUTH_BANNER_TEXT = UPDATE_BANNER_TEXT = ""
+AMBER_BTN_FG = GREEN_BTN_FG = ""
+BLUE_TEXT = RED_TEXT = ""
+
+PILL_COLORS: dict[PkgState, tuple[str, str]] = {}
+DOT_COLORS: dict[PkgState, str] = {}
+
+
+def _apply_palette(palette: dict[str, str]) -> None:
+    """Update all module-level color globals from a palette dict."""
+    g = globals()
+    for key, val in palette.items():
+        g[key] = val
+    g["PILL_COLORS"] = {
+        PkgState.OFF:      (palette["PILL_OFF_BG"],      palette["PILL_OFF_FG"]),
+        PkgState.STARTING: (palette["PILL_STARTING_BG"], palette["PILL_STARTING_FG"]),
+        PkgState.RUNNING:  (palette["PILL_RUNNING_BG"],  palette["PILL_RUNNING_FG"]),
+        PkgState.ERROR:    (palette["PILL_ERROR_BG"],     palette["PILL_ERROR_FG"]),
+    }
+    g["DOT_COLORS"] = {
+        PkgState.OFF:      palette["DOT_OFF"],
+        PkgState.STARTING: palette["DOT_STARTING"],
+        PkgState.RUNNING:  palette["DOT_RUNNING"],
+        PkgState.ERROR:    palette["DOT_ERROR"],
+    }
+
+
+def _detect_system_theme() -> str:
+    """Return 'dark' or 'light' based on macOS system appearance."""
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True, timeout=3,
+        )
+        if b"Dark" in result.stdout:
+            return "dark"
+    except Exception:
+        pass
+    return "light"
+
+
+def _blend(c1: str, c2: str, t: float) -> str:
+    """Linear interpolation between two hex colors. t=0 → c1, t=1 → c2."""
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r = int(r1 + (r2 - r1) * t)
+    g = int(g1 + (g2 - g1) * t)
+    b = int(b1 + (b2 - b1) * t)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+# Apply initial palette based on system theme
+_apply_palette(_DARK if _detect_system_theme() == "dark" else _LIGHT)
 
 # Standard macOS titlebar height (28pt) — used as a spacer so content
 # doesn't overlap the traffic-light buttons.
@@ -210,25 +448,14 @@ _TITLEBAR_HEIGHT = 28
 # Indent for row-2 to align content under the service name (dot canvas + gap)
 DOT_CANVAS_INDENT = 34
 
-PILL_COLORS: dict[PkgState, tuple[str, str]] = {
-    PkgState.OFF:      ("#3A3A44", "#A0A0AB"),
-    PkgState.STARTING: ("#422006", "#FCD34D"),
-    PkgState.RUNNING:  ("#052E16", "#86EFAC"),
-    PkgState.ERROR:    ("#450A0A", "#FCA5A5"),
-}
+# Max card width for resizable window
+CARD_MAX_WIDTH = 520
 
 PILL_LABELS: dict[PkgState, str] = {
     PkgState.OFF:      "Off",
     PkgState.STARTING: "Starting…",
     PkgState.RUNNING:  "Running",
     PkgState.ERROR:    "Error",
-}
-
-DOT_COLORS: dict[PkgState, str] = {
-    PkgState.OFF:      "#52525B",
-    PkgState.STARTING: "#FBBF24",
-    PkgState.RUNNING:  "#4ADE80",
-    PkgState.ERROR:    "#F87171",
 }
 
 
@@ -245,23 +472,23 @@ class LabelButton:
         parent: tk.Widget,
         text: str = "",
         font: tuple = (),
-        bg: str = BLUE,
-        fg: str = "#FFFFFF",
-        hover_bg: str = BLUE_HOVER,
-        hover_fg: str = "#FFFFFF",
-        disabled_bg: str = DISABLED_BG,
-        disabled_fg: str = DISABLED_TEXT,
+        bg: str = "",
+        fg: str = "",
+        hover_bg: str = "",
+        hover_fg: str = "",
+        disabled_bg: str = "",
+        disabled_fg: str = "",
         padx: int = 16,
         pady: int = 7,
         command: Optional[Callable] = None,
         cursor: str = "pointinghand",
     ) -> None:
-        self._bg = bg
-        self._fg = fg
-        self._hover_bg = hover_bg
-        self._hover_fg = hover_fg
-        self._disabled_bg = disabled_bg
-        self._disabled_fg = disabled_fg
+        self._bg = bg or BLUE
+        self._fg = fg or BTN_TEXT
+        self._hover_bg = hover_bg or BLUE_HOVER
+        self._hover_fg = hover_fg or BTN_TEXT
+        self._disabled_bg = disabled_bg or DISABLED_BG
+        self._disabled_fg = disabled_fg or DISABLED_TEXT
         self._command = command
         self._enabled = True
 
@@ -269,8 +496,8 @@ class LabelButton:
             parent,
             text=text,
             font=font,
-            bg=bg,
-            fg=fg,
+            bg=self._bg,
+            fg=self._fg,
             padx=padx,
             pady=pady,
             cursor=cursor,
@@ -290,6 +517,10 @@ class LabelButton:
         self._label.pack_forget()
 
     def configure(self, **kwargs) -> None:
+        if "disabled_bg" in kwargs:
+            self._disabled_bg = kwargs.pop("disabled_bg")
+        if "disabled_fg" in kwargs:
+            self._disabled_fg = kwargs.pop("disabled_fg")
         if "state" in kwargs:
             state = kwargs.pop("state")
             self._enabled = (state != tk.DISABLED)
@@ -338,33 +569,49 @@ class LabelButton:
 
 class CanvasButton:
     """Button drawn on a tk.Canvas — rounded corners and full color control
-    on macOS Aqua (tk.Button ignores bg/fg entirely on this platform)."""
+    on macOS Aqua (tk.Button ignores bg/fg entirely on this platform).
 
-    RADIUS = 8
+    Fill: overlapping ovals + rects (single color, no outline — clean).
+    Border: create_arc corner strokes (anti-aliased by CoreGraphics) +
+    create_line straight edges (axis-aligned, crisp).  Arcs extended 5°
+    past each corner to overlap the lines — prevents junction gaps.
+    """
+
+    RADIUS = 12
+    _TAG_FILL = "rrf"   # fill layer (ovals + rects)
+    _TAG_BA = "rrba"    # border arcs  (recolour via outline=)
+    _TAG_BL = "rrbl"    # border lines (recolour via fill=)
+    _TAG_ICON = "rri"   # icon items
+    _ICON_W = 10        # icon drawing area width
+    _ICON_GAP = 4       # gap between icon and text
 
     def __init__(
         self,
         parent: tk.Widget,
         text: str = "",
         font: tuple = (),
-        bg: str = BLUE,
-        fg: str = "#FFFFFF",
-        hover_bg: str = BLUE_HOVER,
-        hover_fg: str = "#FFFFFF",
-        disabled_bg: str = DISABLED_BG,
-        disabled_fg: str = DISABLED_TEXT,
+        bg: str = "",
+        fg: str = "",
+        hover_bg: str = "",
+        hover_fg: str = "",
+        disabled_bg: str = "",
+        disabled_fg: str = "",
         padx: int = 16,
         pady: int = 6,
         command: Optional[Callable] = None,
-        parent_bg: str = CARD_BG,
+        parent_bg: str = "",
         min_width: int = 0,
+        outline: str = "",
+        outline_width: int = 0,
+        hover_outline: str = "",
+        icon: Optional[str] = None,
     ) -> None:
-        self._bg = bg
-        self._fg = fg
-        self._hover_bg = hover_bg
-        self._hover_fg = hover_fg
-        self._disabled_bg = disabled_bg
-        self._disabled_fg = disabled_fg
+        self._bg = bg or BLUE
+        self._fg = fg or BTN_TEXT
+        self._hover_bg = hover_bg or BLUE_HOVER
+        self._hover_fg = hover_fg or BTN_TEXT
+        self._disabled_bg = disabled_bg or DISABLED_BG
+        self._disabled_fg = disabled_fg or DISABLED_TEXT
         self._command = command
         self._enabled = True
         self._text = text
@@ -372,25 +619,35 @@ class CanvasButton:
         self._padx = padx
         self._pady = pady
         self._min_w = min_width
+        self._outline = outline
+        self._outline_width = outline_width or (2 if outline else 0)
+        self._hover_outline = hover_outline
+        self._icon = icon
 
         tmp = self._make_font()
         text_w = tmp.measure(text)
         text_h = tmp.metrics("linespace")
-        self._w = max(text_w + padx * 2, min_width)
+        icon_extra = (self._ICON_W + self._ICON_GAP) if icon else 0
+        self._w = max(text_w + icon_extra + padx * 2, min_width)
         self._h = text_h + pady * 2
 
+        _parent_bg = parent_bg or CARD_BG
         self._canvas = tk.Canvas(
             parent,
             width=self._w, height=self._h,
-            bg=parent_bg,
+            bg=_parent_bg,
             highlightthickness=0,
             cursor="pointinghand",
         )
-        self._rect = self._draw_rounded_rect(bg)
+        self._text_id = None
+        self._redraw_bg()
+        tx, ty = self._text_pos(text_w, icon_extra)
         self._text_id = self._canvas.create_text(
-            self._w // 2, self._h // 2,
-            text=text, fill=fg, font=font,
+            tx, ty, text=text, fill=self._fg, font=font,
         )
+        if icon:
+            self._draw_icon(icon_extra, text_w)
+            self._canvas.tag_raise(self._text_id)
         self._canvas.bind("<Button-1>", self._on_click)
         self._canvas.bind("<Enter>", self._on_enter)
         self._canvas.bind("<Leave>", self._on_leave)
@@ -403,18 +660,127 @@ class CanvasButton:
             weight=f[2] if len(f) > 2 else "normal",
         )
 
-    def _draw_rounded_rect(self, fill: str) -> int:
-        r = self.RADIUS
-        x1, y1, x2, y2 = 1, 1, self._w - 1, self._h - 1
-        points = [
-            x1+r, y1,   x2-r, y1,
-            x2,   y1,   x2,   y1+r,
-            x2,   y2-r, x2,   y2,
-            x2-r, y2,   x1+r, y2,
-            x1,   y2,   x1,   y2-r,
-            x1,   y1+r, x1,   y1,
-        ]
-        return self._canvas.create_polygon(points, smooth=True, fill=fill, outline="")
+    def _text_pos(self, text_w: float = 0, icon_extra: float = 0) -> tuple:
+        """Return (x, y) center for the text item."""
+        if not text_w:
+            text_w = self._make_font().measure(self._text)
+        if icon_extra == 0 and self._icon:
+            icon_extra = self._ICON_W + self._ICON_GAP
+        total = icon_extra + text_w
+        start_x = (self._w - total) / 2
+        tx = start_x + icon_extra + text_w / 2
+        return tx, self._h / 2
+
+    def _draw_icon(self, icon_extra: float = 0, text_w: float = 0) -> None:
+        """Draw the current icon (play/stop) next to the text."""
+        self._canvas.delete(self._TAG_ICON)
+        if not self._icon:
+            return
+        if not text_w:
+            text_w = self._make_font().measure(self._text)
+        if not icon_extra:
+            icon_extra = self._ICON_W + self._ICON_GAP
+        total = icon_extra + text_w
+        start_x = (self._w - total) / 2
+        cx = start_x + self._ICON_W / 2
+        cy = self._h / 2
+        fg = self._disabled_fg if not self._enabled else self._fg
+        if self._icon == "play":
+            self._canvas.create_polygon(
+                cx - 4, cy - 5, cx - 4, cy + 5, cx + 5, cy,
+                fill=fg, outline="", tags=(self._TAG_ICON,),
+            )
+        elif self._icon == "stop":
+            self._canvas.create_rectangle(
+                cx - 4, cy - 4, cx + 4, cy + 4,
+                fill=fg, outline="", tags=(self._TAG_ICON,),
+            )
+
+    # ---- Rounded-rect rendering ----------------------------------------
+
+    def _draw_rr_fill(self, x1: float, y1: float, x2: float, y2: float,
+                      r: float, color: str) -> None:
+        """Draw fill: 4 overlapping ovals + 2 rects, single color."""
+        c = self._canvas
+        d = 2 * r
+        tag = self._TAG_FILL
+        c.create_oval(x1, y1, x1 + d, y1 + d, fill=color, outline="", tags=(tag,))
+        c.create_oval(x2 - d, y1, x2, y1 + d, fill=color, outline="", tags=(tag,))
+        c.create_oval(x1, y2 - d, x1 + d, y2, fill=color, outline="", tags=(tag,))
+        c.create_oval(x2 - d, y2 - d, x2, y2, fill=color, outline="", tags=(tag,))
+        c.create_rectangle(x1 + r, y1, x2 - r, y2, fill=color, outline="", tags=(tag,))
+        c.create_rectangle(x1, y1 + r, x2, y2 - r, fill=color, outline="", tags=(tag,))
+
+    def _draw_rr_border(self, ow: int, r: float, color: str) -> None:
+        """Draw border: arc strokes (anti-aliased) + straight lines.
+
+        Arcs are extended 5° past each 90° corner so they overlap the
+        straight lines, preventing any visible gap at the junction.
+        """
+        c = self._canvas
+        w, h = self._w, self._h
+        inset = math.ceil(ow / 2)  # round up so stroke stays inside canvas
+        bx1, by1 = inset, inset
+        bx2, by2 = w - inset, h - inset
+        rb = max(r - inset, 1)
+        d = 2 * rb
+        ta, tl = self._TAG_BA, self._TAG_BL
+        _OV = 5  # overlap degrees
+        ov_px = rb * math.sin(math.radians(_OV))  # ~1px at r=12
+        # Corner arc strokes (anti-aliased by CoreGraphics)
+        c.create_arc(bx1, by1, bx1 + d, by1 + d,
+                     start=90 - _OV, extent=90 + 2 * _OV,
+                     style="arc", outline=color, width=ow, tags=(ta,))
+        c.create_arc(bx2 - d, by1, bx2, by1 + d,
+                     start=0 - _OV, extent=90 + 2 * _OV,
+                     style="arc", outline=color, width=ow, tags=(ta,))
+        c.create_arc(bx1, by2 - d, bx1 + d, by2,
+                     start=180 - _OV, extent=90 + 2 * _OV,
+                     style="arc", outline=color, width=ow, tags=(ta,))
+        c.create_arc(bx2 - d, by2 - d, bx2, by2,
+                     start=270 - _OV, extent=90 + 2 * _OV,
+                     style="arc", outline=color, width=ow, tags=(ta,))
+        # Straight edges (extended into arc overlap region)
+        c.create_line(bx1 + rb - ov_px, by1, bx2 - rb + ov_px, by1,
+                      fill=color, width=ow, tags=(tl,))
+        c.create_line(bx1 + rb - ov_px, by2, bx2 - rb + ov_px, by2,
+                      fill=color, width=ow, tags=(tl,))
+        c.create_line(bx1, by1 + rb - ov_px, bx1, by2 - rb + ov_px,
+                      fill=color, width=ow, tags=(tl,))
+        c.create_line(bx2, by1 + rb - ov_px, bx2, by2 - rb + ov_px,
+                      fill=color, width=ow, tags=(tl,))
+
+    def _redraw_bg(self) -> None:
+        """Delete and redraw fill (+ border if keyline)."""
+        self._canvas.delete(self._TAG_FILL)
+        self._canvas.delete(self._TAG_BA)
+        self._canvas.delete(self._TAG_BL)
+        r = min(self.RADIUS, self._w / 2, self._h / 2)
+        ow = self._outline_width
+        fill = self._bg if self._enabled else self._disabled_bg
+        # Fill layer — ovals + rects
+        self._draw_rr_fill(0, 0, self._w, self._h, r, fill)
+        # Border on top (keyline only)
+        if ow > 0:
+            border = self._outline if self._outline else self._bg
+            if not self._enabled:
+                border = self._disabled_bg
+            self._draw_rr_border(ow, r, border)
+        # Keep foreground items on top
+        if self._canvas.find_withtag(self._TAG_ICON):
+            self._canvas.tag_raise(self._TAG_ICON)
+        if self._text_id is not None:
+            self._canvas.tag_raise(self._text_id)
+
+    def _set_colors(self, fill: str, border: str) -> None:
+        """Update layer colors without redrawing geometry."""
+        self._canvas.itemconfigure(self._TAG_FILL, fill=fill)
+        if self._canvas.find_withtag(self._TAG_BA):
+            self._canvas.itemconfigure(self._TAG_BA, outline=border)
+        if self._canvas.find_withtag(self._TAG_BL):
+            self._canvas.itemconfigure(self._TAG_BL, fill=border)
+
+    # ---- Public API ----------------------------------------------------
 
     @property
     def widget(self) -> tk.Canvas:
@@ -427,36 +793,77 @@ class CanvasButton:
         self._canvas.pack_forget()
 
     def configure(self, **kw) -> None:
+        if "parent_bg" in kw:
+            self._canvas.configure(bg=kw.pop("parent_bg"))
+        if "disabled_bg" in kw:
+            self._disabled_bg = kw.pop("disabled_bg")
+        if "disabled_fg" in kw:
+            self._disabled_fg = kw.pop("disabled_fg")
+        if "outline" in kw:
+            self._outline = kw.pop("outline")
+            if self._enabled:
+                oln = self._outline if self._outline else self._bg
+                if self._canvas.find_withtag(self._TAG_BA):
+                    self._canvas.itemconfigure(self._TAG_BA, outline=oln)
+                if self._canvas.find_withtag(self._TAG_BL):
+                    self._canvas.itemconfigure(self._TAG_BL, fill=oln)
+        if "hover_outline" in kw:
+            self._hover_outline = kw.pop("hover_outline")
         if "state" in kw:
             state = kw.pop("state")
             self._enabled = (state != tk.DISABLED)
-            fill = self._bg if self._enabled else self._disabled_bg
-            tfill = self._fg if self._enabled else self._disabled_fg
+            if self._enabled:
+                fill = self._bg
+                oln = self._outline if self._outline else self._bg
+                tfill = self._fg
+            else:
+                fill = self._disabled_bg
+                oln = self._disabled_bg
+                tfill = self._disabled_fg
             cur = "pointinghand" if self._enabled else ""
-            self._canvas.itemconfigure(self._rect, fill=fill)
+            self._set_colors(fill, oln)
             self._canvas.itemconfigure(self._text_id, fill=tfill)
+            if self._canvas.find_withtag(self._TAG_ICON):
+                self._canvas.itemconfigure(self._TAG_ICON, fill=tfill)
             self._canvas.configure(cursor=cur)
+        _need_layout = False
+        if "outline_width" in kw:
+            self._outline_width = kw.pop("outline_width")
+            _need_layout = True
+        if "icon" in kw:
+            self._icon = kw.pop("icon")
+            _need_layout = True
         if "text" in kw:
             self._text = kw.pop("text")
+            _need_layout = True
+        if _need_layout:
             tmp = self._make_font()
-            desired_w = max(tmp.measure(self._text) + self._padx * 2, self._min_w)
-            if desired_w != self._w:
-                self._w = desired_w
-                self._canvas.configure(width=self._w)
-                self._canvas.delete(self._rect)
-                self._rect = self._draw_rounded_rect(
-                    self._bg if self._enabled else self._disabled_bg
-                )
-                self._canvas.coords(self._text_id, self._w // 2, self._h // 2)
+            text_w = tmp.measure(self._text)
+            icon_extra = (self._ICON_W + self._ICON_GAP) if self._icon else 0
+            desired_w = max(text_w + icon_extra + self._padx * 2, self._min_w)
+            self._w = desired_w
+            self._canvas.configure(width=self._w)
+            self._redraw_bg()
+            tx, ty = self._text_pos(text_w, icon_extra)
+            self._canvas.coords(self._text_id, tx, ty)
             self._canvas.itemconfigure(self._text_id, text=self._text)
+            self._draw_icon(icon_extra, text_w)
+            self._canvas.tag_raise(self._text_id)
         if "bg" in kw:
             self._bg = kw.pop("bg")
             if self._enabled:
-                self._canvas.itemconfigure(self._rect, fill=self._bg)
+                self._canvas.itemconfigure(self._TAG_FILL, fill=self._bg)
+                if not self._outline:
+                    if self._canvas.find_withtag(self._TAG_BA):
+                        self._canvas.itemconfigure(self._TAG_BA, outline=self._bg)
+                    if self._canvas.find_withtag(self._TAG_BL):
+                        self._canvas.itemconfigure(self._TAG_BL, fill=self._bg)
         if "fg" in kw:
             self._fg = kw.pop("fg")
             if self._enabled:
                 self._canvas.itemconfigure(self._text_id, fill=self._fg)
+                if self._canvas.find_withtag(self._TAG_ICON):
+                    self._canvas.itemconfigure(self._TAG_ICON, fill=self._fg)
         if "hover_bg" in kw:
             self._hover_bg = kw.pop("hover_bg")
         if "hover_fg" in kw:
@@ -470,13 +877,19 @@ class CanvasButton:
 
     def _on_enter(self, _e) -> None:
         if self._enabled:
-            self._canvas.itemconfigure(self._rect, fill=self._hover_bg)
+            h_oln = self._hover_outline if self._hover_outline else self._hover_bg
+            self._set_colors(self._hover_bg, h_oln)
             self._canvas.itemconfigure(self._text_id, fill=self._hover_fg)
+            if self._canvas.find_withtag(self._TAG_ICON):
+                self._canvas.itemconfigure(self._TAG_ICON, fill=self._hover_fg)
 
     def _on_leave(self, _e) -> None:
         if self._enabled:
-            self._canvas.itemconfigure(self._rect, fill=self._bg)
+            oln = self._outline if self._outline else self._bg
+            self._set_colors(self._bg, oln)
             self._canvas.itemconfigure(self._text_id, fill=self._fg)
+            if self._canvas.find_withtag(self._TAG_ICON):
+                self._canvas.itemconfigure(self._TAG_ICON, fill=self._fg)
 
 
 # ---------------------------------------------------------------------------
@@ -498,25 +911,24 @@ class DotAnimator:
     _PAD  = 3    # padding around glow so canvas isn't clipped
     _W    = _GLOW + _PAD * 2  # canvas width/height (24px)
 
-    # Amber pulse: simulate breathing by cycling glow-ring colour
-    _PULSE_STEPS = [
-        "#FBBF24", "#C99B1E", "#977318", "#5A4830",
-        "#2A2A32",  # matches CARD_BG — "off"
-        "#5A4830", "#977318", "#C99B1E",
-    ]
-
     # Error blink: on-off-on-off-on, then steady for several frames
     _BLINK_PATTERN = [True, False, True, False, True,
                       True, True, True, True, True, True, True]
     _BLINK_MS      = [200,  200,   200,  200,   200,
                       500,  500,   500,  500,   500,  500,  500]
 
-    def __init__(self, parent: tk.Widget, bg: str = CARD_BG) -> None:
+    def _pulse_steps(self) -> list[str]:
+        """Compute pulse gradient dynamically from current theme colors."""
+        # 8 steps: AMBER → CARD_BG → AMBER (breathing effect)
+        fracs = [0.0, 0.25, 0.5, 0.75, 1.0, 0.75, 0.5, 0.25]
+        return [_blend(AMBER, CARD_BG, t) for t in fracs]
+
+    def __init__(self, parent: tk.Widget, bg: str = "") -> None:
         w = self._W
-        self._bg = bg
+        self._bg = bg or CARD_BG
         self._canvas = tk.Canvas(
             parent, width=w, height=w,
-            bg=bg, highlightthickness=0,
+            bg=self._bg, highlightthickness=0,
         )
         cx = cy = w // 2
 
@@ -524,7 +936,7 @@ class DotAnimator:
         self._glow_id = self._canvas.create_oval(
             cx - self._GLOW // 2, cy - self._GLOW // 2,
             cx + self._GLOW // 2, cy + self._GLOW // 2,
-            fill=bg, outline="",
+            fill=self._bg, outline="",
         )
         # Core dot
         self._dot_id = self._canvas.create_oval(
@@ -557,6 +969,13 @@ class DotAnimator:
         elif state == PkgState.ERROR:
             self._blink(root, 0)
 
+    def retheme(self, bg: str) -> None:
+        """Update background color for theme change, re-apply current state."""
+        self._bg = bg
+        self._canvas.configure(bg=bg)
+        if self._root is not None:
+            self.set_state(self._state, self._root)
+
     def cancel(self) -> None:
         self._cancel()
 
@@ -573,7 +992,8 @@ class DotAnimator:
             return
         if not self._canvas.winfo_exists():
             return
-        color = self._PULSE_STEPS[step % len(self._PULSE_STEPS)]
+        steps = self._pulse_steps()
+        color = steps[step % len(steps)]
         self._canvas.itemconfigure(self._glow_id, fill=color)
         self._anim_id = root.after(150, self._pulse, root, step + 1)
 
@@ -1293,7 +1713,7 @@ class AddServiceDialog:
             font=(fn, 12), width=34,
             relief=tk.FLAT, highlightthickness=1,
             highlightbackground=CARD_BORDER, highlightcolor=BLUE,
-            bg="#1A1A22", fg=TEXT_PRIMARY,
+            bg=INPUT_BG, fg=TEXT_PRIMARY,
             insertbackground=TEXT_PRIMARY,
         )
         entry.pack(side=tk.LEFT, ipady=7)
@@ -1306,8 +1726,8 @@ class AddServiceDialog:
         detect_btn = CanvasButton(
             input_row, text="Detect", font=(fn, 12, "bold"),
             command=self._on_detect,
-            bg=BLUE, fg="#FFFFFF",
-            hover_bg=BLUE_HOVER, hover_fg="#FFFFFF",
+            bg=BLUE, fg=BTN_TEXT,
+            hover_bg=BLUE_HOVER, hover_fg=BTN_TEXT,
             padx=16, pady=7,
             parent_bg=CARD_BG,
             min_width=_detect_min_w,
@@ -1346,8 +1766,8 @@ class AddServiceDialog:
         confirm_btn = CanvasButton(
             btn_row, text="Add Service", font=(fn, 12, "bold"),
             command=self._on_confirm_clicked,
-            bg=BLUE, fg="#FFFFFF",
-            hover_bg=BLUE_HOVER, hover_fg="#FFFFFF",
+            bg=BLUE, fg=BTN_TEXT,
+            hover_bg=BLUE_HOVER, hover_fg=BTN_TEXT,
             padx=16, pady=7,
             parent_bg=CARD_BG,
         )
@@ -1373,7 +1793,7 @@ class AddServiceDialog:
                 font=(fn, 12), width=28,
                 relief=tk.FLAT, highlightthickness=1,
                 highlightbackground=CARD_BORDER, highlightcolor=BLUE,
-                bg="#1A1A22", fg=TEXT_PRIMARY,
+                bg=INPUT_BG, fg=TEXT_PRIMARY,
                 insertbackground=TEXT_PRIMARY,
             )
             e.pack(side=tk.LEFT, padx=(8, 0), ipady=5)
@@ -1398,7 +1818,7 @@ class AddServiceDialog:
         detected_port = detected_port_m.group(1) if detected_port_m else None
 
         url_warn_lbl = tk.Label(
-            frame, text="", bg=CARD_BG, fg="#FCD34D",
+            frame, text="", bg=CARD_BG, fg=WARNING_TEXT,
             font=(fn, 10), wraplength=340, justify="left", anchor="w",
         )
         url_warn_lbl.pack(fill=tk.X, padx=(16 + 8 + 2, 0), pady=(0, 2))
@@ -1423,7 +1843,7 @@ class AddServiceDialog:
         self._cmd_var    = cmd_var
         self._url_var    = url_var
 
-        dup_lbl = tk.Label(frame, text="", bg=CARD_BG, fg="#FCA5A5", font=(fn, 10))
+        dup_lbl = tk.Label(frame, text="", bg=CARD_BG, fg=ERROR_TEXT, font=(fn, 10))
         dup_lbl.pack(anchor="w", pady=(2, 0))
         self._dup_lbl = dup_lbl
 
@@ -1451,12 +1871,12 @@ class AddServiceDialog:
     def _on_detect(self) -> None:
         raw = self._entry_var.get().strip()
         if not raw:
-            self._status_lbl.configure(text="Please enter a GitHub URL or owner/repo.", fg="#FCA5A5")
+            self._status_lbl.configure(text="Please enter a GitHub URL or owner/repo.", fg=ERROR_TEXT)
             return
         try:
             owner, repo = parse_github_input(raw)
         except ValueError as exc:
-            self._status_lbl.configure(text=str(exc), fg="#FCA5A5")
+            self._status_lbl.configure(text=str(exc), fg=ERROR_TEXT)
             return
 
         self._state = _DialogState.DETECTING
@@ -1493,7 +1913,7 @@ class AddServiceDialog:
                 elif msg[0] == "error":
                     self._state = _DialogState.IDLE
                     self._detect_btn.configure(state=tk.NORMAL, text="Detect")
-                    self._status_lbl.configure(text=msg[1], fg="#FCA5A5")
+                    self._status_lbl.configure(text=msg[1], fg=ERROR_TEXT)
         except queue.Empty:
             pass
         self._top.after(self._POLL_MS, self._poll)
@@ -1514,7 +1934,7 @@ class AddServiceDialog:
         try:
             append_package_to_config(self._config_path, pkg)
         except OSError as exc:
-            self._status_lbl.configure(text=f"Failed to save config: {exc}", fg="#FCA5A5")
+            self._status_lbl.configure(text=f"Failed to save config: {exc}", fg=ERROR_TEXT)
             self._confirm_btn.configure(state=tk.NORMAL)
             self._state = _DialogState.REVIEW
             return
@@ -1578,7 +1998,7 @@ class EditServiceDialog:
                 row, textvariable=var, font=(fn, 12), width=28,
                 relief=tk.FLAT, highlightthickness=1,
                 highlightbackground=CARD_BORDER, highlightcolor=BLUE,
-                bg="#1A1A22", fg=TEXT_PRIMARY,
+                bg=INPUT_BG, fg=TEXT_PRIMARY,
                 insertbackground=TEXT_PRIMARY,
             )
             e.pack(side=tk.LEFT, padx=(8, 0), ipady=5)
@@ -1641,8 +2061,8 @@ class EditServiceDialog:
         save_btn = CanvasButton(
             btn_row, text="Save Changes", font=(fn, 12, "bold"),
             command=lambda: self._save(branch_var, cmd_var, url_var, fairy_backup_var),
-            bg=BLUE, fg="#FFFFFF",
-            hover_bg=BLUE_HOVER, hover_fg="#FFFFFF",
+            bg=BLUE, fg=BTN_TEXT,
+            hover_bg=BLUE_HOVER, hover_fg=BTN_TEXT,
             padx=16, pady=7, parent_bg=CARD_BG,
         )
         save_btn.pack(side=tk.LEFT)
@@ -1723,7 +2143,8 @@ class FairyStartApp:
     def _build_ui(self) -> None:
         root = tk.Tk()
         root.title("Fairy Start")
-        root.resizable(False, True)
+        root.resizable(True, True)
+        root.minsize(460, 300)
         root.configure(bg=WINDOW_BG)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._root = root
@@ -1737,63 +2158,58 @@ class FairyStartApp:
         fn = self._font_name
 
         # ── Titlebar spacer (keeps content below traffic-light buttons) ─
-        spacer = tk.Frame(root, bg=HEADER_BG, height=_TITLEBAR_HEIGHT)
-        spacer.pack(fill=tk.X)
-        spacer.pack_propagate(False)
+        self._spacer = tk.Frame(root, bg=HEADER_BG, height=_TITLEBAR_HEIGHT)
+        self._spacer.pack(fill=tk.X)
+        self._spacer.pack_propagate(False)
 
         # ── Header bar ─────────────────────────────────────────────────
-        header = tk.Frame(root, bg=HEADER_BG, height=52)
-        header.pack(fill=tk.X)
-        header.pack_propagate(False)
+        self._header = tk.Frame(root, bg=HEADER_BG, height=52)
+        self._header.pack(fill=tk.X)
+        self._header.pack_propagate(False)
+        header = self._header
 
         # App icon inline in header
+        self._header_icon_lbl = None
         try:
             _hicon_path = pathlib.Path(__file__).parent / "AppIcon.iconset" / "icon_32x32@2x.png"
             if _hicon_path.exists():
                 _raw_icon = tk.PhotoImage(file=str(_hicon_path))
                 self._header_icon = _raw_icon.subsample(2)   # 64×64 → 32×32 logical px
-                tk.Label(
+                self._header_icon_lbl = tk.Label(
                     header, image=self._header_icon, bg=HEADER_BG,
-                ).pack(side=tk.LEFT, padx=(16, 0))
+                )
+                self._header_icon_lbl.pack(side=tk.LEFT, padx=(16, 0))
         except Exception:
             pass
 
-        tk.Label(
+        self._header_title_lbl = tk.Label(
             header, text="Fairy Start",
             bg=HEADER_BG, fg=TEXT_PRIMARY,
             font=(fn, 16, "bold"),
-        ).pack(side=tk.LEFT, padx=(8, 0))
-
-        # ── Circular "+" add button (rightmost) ──────────────────────
-        _ADD = 28
-        add_canvas = tk.Canvas(
-            header, width=_ADD, height=_ADD,
-            bg=HEADER_BG, highlightthickness=0, cursor="pointinghand",
         )
-        add_canvas.create_oval(1, 1, _ADD - 1, _ADD - 1,
-                               fill=CARD_BG, outline=CARD_BORDER, width=1, tags="bg")
-        _mid = _ADD // 2
-        add_canvas.create_line(_mid, 7, _mid, _ADD - 7, fill=TEXT_SECONDARY, width=2, tags="plus")
-        add_canvas.create_line(7, _mid, _ADD - 7, _mid, fill=TEXT_SECONDARY, width=2, tags="plus")
-        add_canvas.pack(side=tk.RIGHT, padx=(0, 16))
-        add_canvas.bind("<Button-1>", lambda e: self._on_add_service())
-        add_canvas.bind("<Enter>", lambda e: (
-            add_canvas.itemconfigure("bg",   fill=BLUE, outline=BLUE),
-            add_canvas.itemconfigure("plus", fill="#FFFFFF"),
-        ))
-        add_canvas.bind("<Leave>", lambda e: (
-            add_canvas.itemconfigure("bg",   fill=CARD_BG, outline=CARD_BORDER),
-            add_canvas.itemconfigure("plus", fill=TEXT_SECONDARY),
-        ))
-        self._add_btn = add_canvas
+        self._header_title_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
+        # ── "+ Add Repo" keyline button (rightmost) ─────────────────
+        add_btn = CanvasButton(
+            header, text="+ Add Repo", font=(fn, 11),
+            bg=HEADER_BG, fg=BLUE_TEXT,
+            outline=BLUE, outline_width=1,
+            hover_bg=BLUE, hover_fg=BTN_TEXT, hover_outline=BLUE,
+            disabled_bg=HEADER_BG, disabled_fg=TEXT_TERTIARY,
+            padx=12, pady=4,
+            command=self._on_add_service, parent_bg=HEADER_BG,
+        )
+        add_btn.pack(side=tk.RIGHT, padx=(0, 16))
+        self._add_btn = add_btn
 
         # ── Start All / Stop All button ──────────────────────────────
         global_btn = CanvasButton(
-            header, text="Start All",
+            header, text="Start All", icon="play",
             font=(fn, 11),
-            bg=CARD_BG, fg=TEXT_SECONDARY,
-            hover_bg=CARD_BORDER_HOVER, hover_fg=TEXT_PRIMARY,
-            disabled_bg=CARD_BG, disabled_fg=TEXT_TERTIARY,
+            bg=HEADER_BG, fg=BLUE_TEXT,
+            outline=BLUE, outline_width=1,
+            hover_bg=BLUE, hover_fg=BTN_TEXT, hover_outline=BLUE,
+            disabled_bg=HEADER_BG, disabled_fg=TEXT_TERTIARY,
             padx=12, pady=4,
             command=self._on_global_action,
             parent_bg=HEADER_BG,
@@ -1805,7 +2221,8 @@ class FairyStartApp:
             global_btn.configure(state=tk.DISABLED)
 
         # Header bottom border
-        tk.Frame(root, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+        self._header_border = tk.Frame(root, bg=CARD_BORDER, height=1)
+        self._header_border.pack(fill=tk.X)
 
         # ── Auth banner (hidden until needed) ──────────────────────────
         self._build_auth_banner()
@@ -1829,6 +2246,14 @@ class FairyStartApp:
         self._build_update_banner()
         self._start_update_check()
 
+        # Theme polling
+        self._current_theme = _detect_system_theme()
+        root.after(2000, self._check_theme)
+
+        # Resizable card centering
+        self._last_center_width = 0
+        cards_outer.bind("<Configure>", self._on_cards_configure)
+
     def _show_empty_state(self) -> None:
         frame = tk.Frame(self._cards_outer, bg=WINDOW_BG)
         frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=24)
@@ -1847,14 +2272,12 @@ class FairyStartApp:
             dots_canvas.create_oval(64, 6, 64 + _DOT, 6 + _DOT,
                                     fill=DOT_COLORS[PkgState.OFF], outline=""),
         ]
-        _PULSE_BRIGHT = "#9CA3AF"
-
         def _pulse_empty(step: int = 0) -> None:
             if not frame.winfo_exists():
                 return
             active = step % 3
             for i, dot_id in enumerate(_dot_ids):
-                color = _PULSE_BRIGHT if i == active else DOT_COLORS[PkgState.OFF]
+                color = PULSE_BRIGHT if i == active else DOT_COLORS[PkgState.OFF]
                 dots_canvas.itemconfigure(dot_id, fill=color)
             frame.after(600, _pulse_empty, step + 1)
 
@@ -1870,8 +2293,8 @@ class FairyStartApp:
         CanvasButton(
             frame, text="+ Add a service",
             font=(self._font_name, 12, "bold"),
-            bg=BLUE, fg="#FFFFFF",
-            hover_bg=BLUE_HOVER, hover_fg="#FFFFFF",
+            bg=BLUE, fg=BTN_TEXT,
+            hover_bg=BLUE_HOVER, hover_fg=BTN_TEXT,
             padx=20, pady=8,
             command=self._on_add_service,
             parent_bg=WINDOW_BG,
@@ -1915,15 +2338,18 @@ class FairyStartApp:
         name_lbl.pack(side=tk.LEFT)
 
         _abfont = tkfont.Font(family=fn, size=10, weight="bold")
+        _ICON_EXTRA = CanvasButton._ICON_W + CanvasButton._ICON_GAP
         _action_min_w = max(
-            _abfont.measure(t)
-            for t in ("Start", "Stop", "Restart", "Starting...", "Stopping...")
+            max(_abfont.measure(t) + _ICON_EXTRA
+                for t in ("Start", "Stop", "Restart")),
+            max(_abfont.measure(t)
+                for t in ("Starting...", "Stopping...")),
         ) + 28
         action_btn = CanvasButton(
-            row1, text="Start",
+            row1, text="Start", icon="play",
             font=(fn, 10, "bold"),
-            bg=BLUE, fg="#FFFFFF",
-            hover_bg=BLUE_HOVER, hover_fg="#FFFFFF",
+            bg=BLUE, fg=BTN_TEXT,
+            hover_bg=BLUE_HOVER, hover_fg=BTN_TEXT,
             padx=14, pady=4,
             command=lambda n=pkg.name: self._on_pkg_action(n),
             parent_bg=CARD_BG,
@@ -1956,6 +2382,30 @@ class FairyStartApp:
         if not pkg.fairy_backup:
             backup_off_lbl.pack(side=tk.LEFT, padx=(6, 0))
 
+        # ── Inline Edit / Remove links (always visible, right-aligned) ──
+        _rlf  = tkfont.Font(family=fn, size=10)
+        _rlfu = tkfont.Font(family=fn, size=10, underline=True)
+
+        remove_link = tk.Label(
+            row2, text="Remove",
+            bg=CARD_BG, fg=REMOVE_LINK,
+            font=_rlf, cursor="pointinghand",
+        )
+        remove_link.pack(side=tk.RIGHT)
+        remove_link.bind("<Button-1>", lambda e, n=pkg.name: self._on_remove_service(n))
+        remove_link.bind("<Enter>", lambda e, b=remove_link: b.configure(fg=REMOVE_LINK_HOVER, font=_rlfu))
+        remove_link.bind("<Leave>", lambda e, b=remove_link: b.configure(fg=REMOVE_LINK, font=_rlf))
+
+        edit_link = tk.Label(
+            row2, text="Edit",
+            bg=CARD_BG, fg=TEXT_TERTIARY,
+            font=_rlf, cursor="pointinghand",
+        )
+        edit_link.pack(side=tk.RIGHT, padx=(0, 12))
+        edit_link.bind("<Button-1>", lambda e, n=pkg.name: self._on_edit_service(n))
+        edit_link.bind("<Enter>", lambda e, b=edit_link: b.configure(fg=TEXT_SECONDARY, font=_rlfu))
+        edit_link.bind("<Leave>", lambda e, b=edit_link: b.configure(fg=TEXT_TERTIARY, font=_rlf))
+
         # ── Context menu (right-click power-user shortcut) ────────────
         ctx_menu = tk.Menu(card, tearoff=False,
                            bg=CARD_BG, fg=TEXT_PRIMARY,
@@ -1977,9 +2427,10 @@ class FairyStartApp:
 
         # ── Advisory / error panel ────────────────────────────────────
         advisory_outer = tk.Frame(card, bg=CARD_BG)
-        tk.Frame(advisory_outer, bg=CARD_BORDER, height=1).pack(fill=tk.X)
+        advisory_sep = tk.Frame(advisory_outer, bg=CARD_BORDER, height=1)
+        advisory_sep.pack(fill=tk.X)
 
-        advisory_inner = tk.Frame(advisory_outer, bg="#450A0A")
+        advisory_inner = tk.Frame(advisory_outer, bg=ERROR_BG)
         advisory_inner.pack(fill=tk.X)
 
         left_bar = tk.Frame(advisory_inner, bg=RED, width=4)
@@ -1987,7 +2438,7 @@ class FairyStartApp:
 
         advisory_lbl = tk.Label(
             advisory_inner, text="",
-            bg="#450A0A", fg="#FCA5A5",
+            bg=ERROR_BG, fg=ERROR_TEXT,
             font=(fn, 10),
             wraplength=340, justify="left", anchor="w",
             padx=12, pady=8,
@@ -2019,45 +2470,18 @@ class FairyStartApp:
         log_frame = tk.Frame(advisory_outer, bg=CARD_BG)
         log_lbl = tk.Label(
             log_frame, text="",
-            bg="#16161C", fg=TEXT_SECONDARY,
+            bg=LOG_BG, fg=TEXT_SECONDARY,
             font=(self._mono_font, 9),
             wraplength=356, justify="left", anchor="w",
             padx=12, pady=8,
         )
         log_lbl.pack(fill=tk.X, padx=16, pady=(0, 8))
 
-        # ── Hover action strip: Edit + Remove ─────────────────────────
-        hover_row = tk.Frame(card, bg=CARD_BG)
-
-        _hlf  = tkfont.Font(family=fn, size=10)
-        _hlfu = tkfont.Font(family=fn, size=10, underline=True)
-
-        remove_link = tk.Label(
-            hover_row, text="Remove",
-            bg=CARD_BG, fg="#7F3535",
-            font=_hlf, cursor="pointinghand",
-        )
-        remove_link.pack(side=tk.RIGHT)
-        remove_link.bind("<Button-1>", lambda e, n=pkg.name: self._on_remove_service(n))
-        remove_link.bind("<Enter>", lambda e, b=remove_link: b.configure(fg=RED))
-        remove_link.bind("<Leave>", lambda e, b=remove_link: b.configure(fg="#7F3535"))
-
-        edit_link = tk.Label(
-            hover_row, text="Edit",
-            bg=CARD_BG, fg=TEXT_TERTIARY,
-            font=_hlf, cursor="pointinghand",
-        )
-        edit_link.pack(side=tk.RIGHT, padx=(0, 12))
-        edit_link.bind("<Button-1>", lambda e, n=pkg.name: self._on_edit_service(n))
-        edit_link.bind("<Enter>", lambda e, b=edit_link: b.configure(fg=TEXT_SECONDARY, font=_hlfu))
-        edit_link.bind("<Leave>", lambda e, b=edit_link: b.configure(fg=TEXT_TERTIARY, font=_hlf))
-
         # ── Bottom padding ────────────────────────────────────────────
         bottom_pad = tk.Frame(card, bg=CARD_BG, height=14)
         bottom_pad.pack(fill=tk.X)
 
-        # ── Card hover: brighten border + reveal action strip ─────────
-        hover_row_shown = [False]
+        # ── Card hover: brighten border ─────────────────────────────────
         _hover_cancel   = [None]
         accordion_open  = [False]
 
@@ -2081,10 +2505,6 @@ class FairyStartApp:
                 self._root.after_cancel(_hover_cancel[0])
                 _hover_cancel[0] = None
             card.configure(highlightbackground=CARD_BORDER_HOVER)
-            if not hover_row_shown[0]:
-                hover_row.pack(fill=tk.X, padx=16, pady=(0, 0), before=bottom_pad)
-                hover_row_shown[0] = True
-                self._root.geometry("")
 
         def _on_hover_leave(e: tk.Event) -> None:
             def _check() -> None:
@@ -2099,10 +2519,6 @@ class FairyStartApp:
                 if cx <= x < cx + cw and cy <= y < cy + ch:
                     return  # pointer still inside card
                 card.configure(highlightbackground=CARD_BORDER)
-                if hover_row_shown[0]:
-                    hover_row.pack_forget()
-                    hover_row_shown[0] = False
-                    self._root.geometry("")
             _hover_cancel[0] = self._root.after(80, _check)
 
         def _bind_events(w: tk.Widget) -> None:
@@ -2120,9 +2536,11 @@ class FairyStartApp:
             "card":            card,
             "dot_animator":    dot_animator,
             "action_btn":      action_btn,
+            "name_lbl":        name_lbl,
             "url_lbl":         url_lbl,
             "backup_off_lbl":  backup_off_lbl,
             "advisory_outer": advisory_outer,
+            "advisory_sep":  advisory_sep,
             "advisory_lbl":   advisory_lbl,
             "advisory_inner": advisory_inner,
             "left_bar":       left_bar,
@@ -2132,8 +2550,11 @@ class FairyStartApp:
             "accordion_open": accordion_open,
             "_row1":          row1,
             "_row2":          row2,
-            "hover_row":      hover_row,
-            "hover_row_shown": hover_row_shown,
+            "edit_link":      edit_link,
+            "remove_link":    remove_link,
+            "ctx_menu":       ctx_menu,
+            "edit_adv_btn":   edit_adv_btn,
+            "adv_action_row": adv_action_row,
             "_hover_cancel":  _hover_cancel,
             "bottom_pad":     bottom_pad,
         }
@@ -2162,20 +2583,22 @@ class FairyStartApp:
         # Action button
         if state == PkgState.OFF:
             w["action_btn"].configure(
-                text="Start", state=tk.NORMAL,
-                bg=BLUE, fg="#FFFFFF", hover_bg=BLUE_HOVER,
+                text="Start", icon="play", state=tk.NORMAL,
+                bg=BLUE, fg=BTN_TEXT, hover_bg=BLUE_HOVER,
             )
         elif state == PkgState.STARTING:
-            w["action_btn"].configure(text="Starting...", state=tk.DISABLED)
+            w["action_btn"].configure(
+                text="Starting...", icon=None, state=tk.DISABLED,
+            )
         elif state == PkgState.RUNNING:
             w["action_btn"].configure(
-                text="Stop", state=tk.NORMAL,
-                bg=STOP_BG, fg="#FFFFFF", hover_bg=RED_HOVER,
+                text="Stop", icon="stop", state=tk.NORMAL,
+                bg=STOP_BG, fg=BTN_TEXT, hover_bg=RED_HOVER,
             )
         elif state == PkgState.ERROR:
             w["action_btn"].configure(
-                text="Restart", state=tk.NORMAL,
-                bg=BLUE, fg="#FFFFFF", hover_bg=BLUE_HOVER,
+                text="Restart", icon="play", state=tk.NORMAL,
+                bg=BLUE, fg=BTN_TEXT, hover_bg=BLUE_HOVER,
             )
 
         # URL label — reset to plain text whenever not RUNNING
@@ -2195,8 +2618,8 @@ class FairyStartApp:
                         or "The service stopped unexpectedly. Check the log for details.")
             w["advisory_lbl"].configure(text=advisory)
             # Error colours (red tint)
-            w["advisory_inner"].configure(bg="#450A0A")
-            w["advisory_lbl"].configure(bg="#450A0A", fg="#FCA5A5")
+            w["advisory_inner"].configure(bg=ERROR_BG)
+            w["advisory_lbl"].configure(bg=ERROR_BG, fg=ERROR_TEXT)
             w["left_bar"].configure(bg=RED)
             if w["accordion_open"][0]:
                 w["log_lbl"].configure(text=log_text)
@@ -2210,6 +2633,167 @@ class FairyStartApp:
 
         self._update_global_btn()
         self._root.geometry("")
+
+    # ---- Theme switching -----------------------------------------------
+
+    def _apply_theme(self, theme: str) -> None:
+        """Switch all UI to the given theme ('dark' or 'light')."""
+        self._current_theme = theme
+        _apply_palette(_DARK if theme == "dark" else _LIGHT)
+
+        # Root window + NSWindow titlebar
+        self._root.configure(bg=WINDOW_BG)
+        _macos_set_titlebar_bg(self._root, WINDOW_BG)
+
+        # Header area
+        self._spacer.configure(bg=HEADER_BG)
+        self._header.configure(bg=HEADER_BG)
+        self._header_title_lbl.configure(bg=HEADER_BG, fg=TEXT_PRIMARY)
+        if self._header_icon_lbl:
+            self._header_icon_lbl.configure(bg=HEADER_BG)
+
+        # Add button
+        self._add_btn.configure(
+            outline_width=1, parent_bg=HEADER_BG,
+            bg=HEADER_BG, fg=BLUE_TEXT,
+            outline=BLUE, hover_bg=BLUE, hover_fg=BTN_TEXT, hover_outline=BLUE,
+            disabled_bg=HEADER_BG, disabled_fg=TEXT_TERTIARY,
+        )
+
+        # Global button
+        self._global_btn.configure(
+            outline_width=1, parent_bg=HEADER_BG,
+            disabled_bg=HEADER_BG, disabled_fg=TEXT_TERTIARY,
+        )
+        self._update_global_btn()
+
+        # Header border
+        self._header_border.configure(bg=CARD_BORDER)
+
+        # Rebuild banners (simplest approach — few widgets)
+        was_auth_visible = self._auth_banner_visible
+        was_update_visible = self._update_banner_visible
+        if self._auth_banner:
+            self._auth_banner.pack_forget()
+            self._auth_banner.destroy()
+            self._auth_banner_visible = False
+        if self._update_banner:
+            self._update_banner.pack_forget()
+            self._update_banner.destroy()
+            self._update_banner_visible = False
+        self._build_auth_banner()
+        self._build_update_banner()
+        if was_auth_visible:
+            self._show_auth_banner()
+        if was_update_visible:
+            self._show_update_banner()
+
+        # Cards outer
+        self._cards_outer.configure(bg=WINDOW_BG)
+
+        # Empty state
+        if self._empty_frame and self._empty_frame.winfo_exists():
+            self._empty_frame.destroy()
+            self._empty_frame = None
+            self._show_empty_state()
+
+        # Per-card retheme
+        for pkg_name, w in self._pkg_widgets.items():
+            state = self._pkg_states.get(pkg_name, PkgState.OFF)
+            self._retheme_card(pkg_name, w, state)
+
+    def _retheme_card(self, pkg_name: str, w: dict, state: PkgState) -> None:
+        """Reconfigure all widgets in a card with current palette colors."""
+        fn = self._font_name
+
+        w["outer"].configure(bg=WINDOW_BG)
+        w["card"].configure(bg=CARD_BG, highlightbackground=CARD_BORDER,
+                            highlightcolor=CARD_BORDER)
+        w["_row1"].configure(bg=CARD_BG)
+        w["_row2"].configure(bg=CARD_BG)
+        w["bottom_pad"].configure(bg=CARD_BG)
+
+        # Name label
+        w["name_lbl"].configure(bg=CARD_BG, fg=TEXT_PRIMARY)
+
+        # Dot animator
+        w["dot_animator"].retheme(CARD_BG)
+
+        # Action button — re-apply state-dependent colors + icons
+        if state == PkgState.OFF:
+            w["action_btn"].configure(
+                icon="play",
+                bg=BLUE, fg=BTN_TEXT, hover_bg=BLUE_HOVER,
+                disabled_bg=DISABLED_BG, disabled_fg=DISABLED_TEXT,
+                parent_bg=CARD_BG,
+            )
+        elif state == PkgState.STARTING:
+            w["action_btn"].configure(
+                icon=None,
+                disabled_bg=DISABLED_BG, disabled_fg=DISABLED_TEXT,
+                parent_bg=CARD_BG,
+            )
+        elif state == PkgState.RUNNING:
+            w["action_btn"].configure(
+                icon="stop",
+                bg=STOP_BG, fg=BTN_TEXT, hover_bg=RED_HOVER,
+                parent_bg=CARD_BG,
+            )
+        elif state == PkgState.ERROR:
+            w["action_btn"].configure(
+                icon="play",
+                bg=BLUE, fg=BTN_TEXT, hover_bg=BLUE_HOVER,
+                parent_bg=CARD_BG,
+            )
+
+        # URL + backup labels
+        if w["url_lbl"]:
+            w["url_lbl"].configure(bg=CARD_BG)
+            # Only set fg if not currently a clickable link (blue)
+            current_fg = str(w["url_lbl"].cget("fg"))
+            if current_fg != BLUE and current_fg != str(BLUE):
+                w["url_lbl"].configure(fg=TEXT_TERTIARY)
+        w["backup_off_lbl"].configure(bg=CARD_BG, fg=TEXT_TERTIARY)
+
+        # Indent spacer in row2
+        for child in w["_row2"].winfo_children():
+            if isinstance(child, tk.Frame):
+                child.configure(bg=CARD_BG)
+                break
+
+        # Edit / Remove links
+        w["edit_link"].configure(bg=CARD_BG, fg=TEXT_TERTIARY)
+        w["remove_link"].configure(bg=CARD_BG, fg=REMOVE_LINK)
+
+        # Context menu
+        w["ctx_menu"].configure(bg=CARD_BG, fg=TEXT_PRIMARY,
+                                activebackground=CARD_BORDER,
+                                activeforeground=TEXT_PRIMARY)
+        # Update "Remove" item foreground (index 2 = after edit + separator)
+        try:
+            w["ctx_menu"].entryconfigure(2, foreground=RED)
+        except Exception:
+            pass
+
+        # Advisory panel
+        w["advisory_outer"].configure(bg=CARD_BG)
+        w["advisory_sep"].configure(bg=CARD_BORDER)
+        w["adv_action_row"].configure(bg=CARD_BG)
+        w["edit_adv_btn"].configure(bg=CARD_BG, fg=BLUE)
+        w["log_toggle"].configure(bg=CARD_BG, fg=TEXT_SECONDARY)
+        w["log_frame"].configure(bg=CARD_BG)
+        w["log_lbl"].configure(bg=LOG_BG, fg=TEXT_SECONDARY)
+
+        # Advisory inner: depends on current advisory state
+        if state == PkgState.ERROR:
+            w["advisory_inner"].configure(bg=ERROR_BG)
+            w["advisory_lbl"].configure(bg=ERROR_BG, fg=ERROR_TEXT)
+            w["left_bar"].configure(bg=RED)
+        else:
+            # Could be warning (amber) or hidden — check if visible
+            w["advisory_inner"].configure(bg=WARNING_BG)
+            w["advisory_lbl"].configure(bg=WARNING_BG, fg=WARNING_TEXT)
+            w["left_bar"].configure(bg=AMBER)
 
     # ---- Health check sub-state updates --------------------------------
 
@@ -2242,8 +2826,8 @@ class FairyStartApp:
                     advisory = (f"Service is on :{log_port_m.group(1)}, not :{cfg_port_m.group(1)}. "
                                 f"Update the URL here, or change the port in the repo.")
                     w["advisory_lbl"].configure(text=advisory)
-                    w["advisory_inner"].configure(bg="#422006")
-                    w["advisory_lbl"].configure(bg="#422006", fg="#FCD34D")
+                    w["advisory_inner"].configure(bg=WARNING_BG)
+                    w["advisory_lbl"].configure(bg=WARNING_BG, fg=WARNING_TEXT)
                     w["left_bar"].configure(bg=AMBER)
                     w["advisory_outer"].pack(fill=tk.X, before=w["bottom_pad"])
                     return
@@ -2263,8 +2847,8 @@ class FairyStartApp:
             advisory = (_make_advisory(log_text)
                         or "The service is responding with errors. Check the log for details.")
             w["advisory_lbl"].configure(text=advisory)
-            w["advisory_inner"].configure(bg="#422006")
-            w["advisory_lbl"].configure(bg="#422006", fg="#FCD34D")
+            w["advisory_inner"].configure(bg=WARNING_BG)
+            w["advisory_lbl"].configure(bg=WARNING_BG, fg=WARNING_TEXT)
             w["left_bar"].configure(bg=AMBER)
             if w["accordion_open"][0]:
                 w["log_lbl"].configure(text=log_text)
@@ -2300,12 +2884,18 @@ class FairyStartApp:
             return
         states = list(self._pkg_states.values())
         if not states:
-            btn.configure(state=tk.DISABLED, text="Start All")
+            btn.configure(state=tk.DISABLED, text="Start All", icon="play")
             return
         if all(s == PkgState.RUNNING for s in states):
-            btn.configure(state=tk.NORMAL, text="Stop All")
+            btn.configure(state=tk.NORMAL, text="Stop All", icon="stop",
+                          bg=HEADER_BG, fg=RED_TEXT,
+                          outline=STOP_BG, hover_bg=STOP_BG,
+                          hover_fg=BTN_TEXT, hover_outline=STOP_BG)
         else:
-            btn.configure(state=tk.NORMAL, text="Start All")
+            btn.configure(state=tk.NORMAL, text="Start All", icon="play",
+                          bg=HEADER_BG, fg=BLUE_TEXT,
+                          outline=BLUE, hover_bg=BLUE,
+                          hover_fg=BTN_TEXT, hover_outline=BLUE)
 
     def _on_global_action(self) -> None:
         states = list(self._pkg_states.values())
@@ -2561,40 +3151,40 @@ class FairyStartApp:
 
     def _build_auth_banner(self) -> None:
         fn = self._font_name
-        banner = tk.Frame(self._root, bg="#2A1A00", height=36)
+        banner = tk.Frame(self._root, bg=AUTH_BANNER_BG, height=36)
         banner.pack_propagate(False)
         # Left amber accent bar
         tk.Frame(banner, bg=AMBER, width=3).pack(side=tk.LEFT, fill=tk.Y)
         # Content area
-        content = tk.Frame(banner, bg="#2A1A00")
+        content = tk.Frame(banner, bg=AUTH_BANNER_BG)
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
         # Warning icon + message
         tk.Label(
             content, text="⚠",
-            bg="#2A1A00", fg=AMBER,
+            bg=AUTH_BANNER_BG, fg=AUTH_BANNER_TEXT,
             font=(fn, 12),
         ).pack(side=tk.LEFT, pady=8)
         tk.Label(
             content,
             text=" GitHub not connected — some repos may be inaccessible.",
-            bg="#2A1A00", fg=AMBER,
+            bg=AUTH_BANNER_BG, fg=AUTH_BANNER_TEXT,
             font=(fn, 11),
         ).pack(side=tk.LEFT, pady=8)
         # Connect button
         connect_btn = CanvasButton(
             banner, text="Connect",
             font=(fn, 11),
-            bg=AMBER, fg="#1E1E24",
-            hover_bg="#F59E0B", hover_fg="#1E1E24",
+            bg=AMBER, fg=AMBER_BTN_FG,
+            hover_bg=AMBER_HOVER, hover_fg=AMBER_BTN_FG,
             padx=10, pady=3,
             command=self._on_connect_github,
-            parent_bg="#2A1A00",
+            parent_bg=AUTH_BANNER_BG,
         )
         connect_btn.pack(side=tk.RIGHT, padx=(0, 8))
         # Dismiss button
         dismiss = tk.Label(
             banner, text="✕",
-            bg="#2A1A00", fg=TEXT_SECONDARY,
+            bg=AUTH_BANNER_BG, fg=TEXT_SECONDARY,
             font=(fn, 12), cursor="pointinghand",
         )
         dismiss.pack(side=tk.RIGHT, padx=(0, 4))
@@ -2651,40 +3241,40 @@ class FairyStartApp:
 
     def _build_update_banner(self) -> None:
         fn = self._font_name
-        banner = tk.Frame(self._root, bg="#0D2017", height=36)
+        banner = tk.Frame(self._root, bg=UPDATE_BANNER_BG, height=36)
         banner.pack_propagate(False)
         # Left green accent bar
         tk.Frame(banner, bg=GREEN, width=3).pack(side=tk.LEFT, fill=tk.Y)
         # Content area
-        content = tk.Frame(banner, bg="#0D2017")
+        content = tk.Frame(banner, bg=UPDATE_BANNER_BG)
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
         # Icon + message
         tk.Label(
             content, text="↑",
-            bg="#0D2017", fg=GREEN,
+            bg=UPDATE_BANNER_BG, fg=UPDATE_BANNER_TEXT,
             font=(fn, 12),
         ).pack(side=tk.LEFT, pady=8)
         tk.Label(
             content,
             text=" An update is available for Fairy Start.",
-            bg="#0D2017", fg=GREEN,
+            bg=UPDATE_BANNER_BG, fg=UPDATE_BANNER_TEXT,
             font=(fn, 11),
         ).pack(side=tk.LEFT, pady=8)
         # Update Now button
         update_btn = CanvasButton(
             banner, text="Update Now",
             font=(fn, 11),
-            bg=GREEN, fg="#0D2017",
-            hover_bg="#22C55E", hover_fg="#0D2017",
+            bg=GREEN, fg=GREEN_BTN_FG,
+            hover_bg=GREEN_HOVER, hover_fg=GREEN_BTN_FG,
             padx=10, pady=3,
             command=self._on_update_now,
-            parent_bg="#0D2017",
+            parent_bg=UPDATE_BANNER_BG,
         )
         update_btn.pack(side=tk.RIGHT, padx=(0, 8))
         # Dismiss button
         dismiss = tk.Label(
             banner, text="✕",
-            bg="#0D2017", fg=TEXT_SECONDARY,
+            bg=UPDATE_BANNER_BG, fg=TEXT_SECONDARY,
             font=(fn, 12), cursor="pointinghand",
         )
         dismiss.pack(side=tk.RIGHT, padx=(0, 4))
@@ -2795,6 +3385,30 @@ class FairyStartApp:
                 if pkg_dir.exists():
                     push = "ux-mark/" in pkg.repo
                     _fairy_backup_pkg(pkg_dir, push=push)
+
+    # ---- Theme polling -----------------------------------------------
+
+    def _check_theme(self) -> None:
+        detected = _detect_system_theme()
+        if detected != self._current_theme:
+            self._apply_theme(detected)
+        self._root.after(2000, self._check_theme)
+
+    # ---- Resizable card centering ------------------------------------
+
+    def _on_cards_configure(self, event: tk.Event) -> None:
+        available = event.width
+        if available == self._last_center_width:
+            return
+        self._last_center_width = available
+        if available > CARD_MAX_WIDTH + 32:
+            padx = (available - CARD_MAX_WIDTH) // 2
+        else:
+            padx = 16
+        for w in self._pkg_widgets.values():
+            w["outer"].pack_configure(padx=padx)
+        if self._empty_frame and self._empty_frame.winfo_exists():
+            self._empty_frame.pack_configure(padx=padx)
 
     # ---- Window close -----------------------------------------------
 
